@@ -364,6 +364,12 @@ appworld install
 appworld download data
 ```
 
+### 7. Math
+Prepare the dataset:
+```bash
+cd repo_root/
+python examples/data_preprocess/verl_agent_math.py
+```
 
 <!-- > ⚠️ **Important:**  
 To run an agent in any of these environments, you must first install and configure the corresponding environment. Please refer to the [Environment Setup Guide](agent_system/environments/README.md) for step-by-step installation instructions. -->
@@ -399,6 +405,9 @@ bash examples/grpo_trainer/run_alfworld.sh # ALFWorld
 ```
 ```bash
 bash examples/grpo_trainer/run_webshop.sh # WebShop
+```
+```bash
+bash examples/grpo_trainer/run_math.sh # WebShop
 ```
 ### 3. PPO
 PPO is a classic actor-critic algorithm that updates the policy using a clipped objective to ensure stable learning. It requires a separate value network (critic) to estimate state values.

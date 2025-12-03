@@ -599,6 +599,74 @@ class AppWorldEnvironmentManager(EnvironmentManagerBase):
                 postprocess_text_obs.append(obs)
         return postprocess_text_obs
 
+
+class MathEnvironmentManager(EnvironmentManagerBase):
+    """
+    EnvironmentManager for MathEnv.
+    """
+    def __init__(self, envs, projection_f, config):
+        super().__init__(envs, projection_f, config)
+
+    def reset(self, kwargs) -> Tuple[Dict[str, Any], List[Dict]]:
+        obs, infos = self.envs.reset(kwargs=kwargs)
+        self.tasks = obs
+
+        observations = {
+            "text": self.build_text_obs(obs),
+            "image": None,
+            "anchor": obs.copy()
+        }
+        
+        return observations, infos
+
+    def step(self, text_actions: List[str]):
+        actions, valids = self.projection_f(text_actions)
+
+        next_obs, rewards, dones, infos = self.envs.step(actions)
+
+        next_observations = {
+            "text": None,
+            "image": None,
+            "anchor": None
+        }
+        
+        for i, info in enumerate(infos):
+            info["is_action_valid"] = to_numpy(valids[i])
+
+        rewards = to_numpy(rewards)
+        dones = to_numpy(dones)
+
+        return next_observations, rewards, dones, infos
+
+    def build_text_obs(
+        self,
+        text_obs: List[str],
+    ) -> List[str]:
+        postprocess_text_obs: List[str] = []
+
+        for i in range(len(text_obs)):
+            obs_i = MATH_TEMPLATE.format(
+                task_description=self.tasks[i]
+            )
+            postprocess_text_obs.append(obs_i)
+
+        return postprocess_text_obs
+
+    def _process_batch(self, batch_idx, total_batch_list, total_infos, success):
+        # Find the last entry with active masks
+        for i in reversed(range(len(total_batch_list[batch_idx]))):
+            batch_item = total_batch_list[batch_idx][i]
+            if batch_item['active_masks']:
+                info = total_infos[batch_idx][i]
+                won_value = float(info['won'])
+                success['success_rate'].append(won_value)
+                
+                # Process game file if it exists
+                data_source = info.get("data_source")
+                success[f"{data_source}_success_rate"].append(won_value)
+                return  # Exit after finding the first active mask
+
+
 def make_envs(config):
     """
     Create enviroments 
@@ -693,6 +761,15 @@ def make_envs(config):
         projection_f = partial(appworld_projection)
         envs = AppWorldEnvironmentManager(_envs, projection_f, config)
         val_envs = AppWorldEnvironmentManager(_val_envs, projection_f, config)
+        return envs, val_envs
+    elif "math" in config.env.env_name.lower():
+        from agent_system.environments.env_package.math import build_math_envs, math_projection
+        _envs = build_math_envs(seed=config.env.seed, env_num=config.data.train_batch_size, group_n=group_n, is_train=True)
+        _val_envs = build_math_envs(seed=config.env.seed + 1000, env_num=config.data.val_batch_size, group_n=1, is_train=False)
+        
+        projection_f = partial(math_projection)
+        envs = MathEnvironmentManager(_envs, projection_f, config)
+        val_envs = MathEnvironmentManager(_val_envs, projection_f, config)
         return envs, val_envs
     else:
         print("Environment not supported")
