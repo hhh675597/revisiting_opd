@@ -569,7 +569,13 @@ class ActorRolloutRefWorker(Worker):
             self.rollout, self.rollout_sharding_manager = self._build_rollout(trust_remote_code=self.config.model.get("trust_remote_code", False))
 
         if self._is_ref:
-            local_path = copy_to_local(self.config.model.path, use_shm=use_shm)
+            # use separate ref model if specified, otherwise fall back to the actor model path
+            ref_model_path = self.config.ref.get("model", {}).get("path", None) or self.config.model.path
+            local_path = copy_to_local(ref_model_path, use_shm=use_shm)
+
+            ref_trust_remote_code = self.config.ref.get("model", {}).get("trust_remote_code", 
+                                                                          self.config.model.get("trust_remote_code", False))
+
             self.ref_module_fsdp = self._build_model_optimizer(
                 model_path=local_path,
                 fsdp_config=self.config.ref.fsdp_config,
@@ -577,7 +583,7 @@ class ActorRolloutRefWorker(Worker):
                 override_model_config=override_model_config,
                 use_remove_padding=use_remove_padding,
                 use_fused_kernels=use_fused_kernels,
-                trust_remote_code=self.config.model.get("trust_remote_code", False),
+                trust_remote_code=ref_trust_remote_code,
                 use_liger=self.config.model.get("use_liger", False),
                 role="ref",
             )[0]

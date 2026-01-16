@@ -8,6 +8,12 @@
 **/*.tar.gz
 **/playground
 **/wandb
+models/
+ckpts/
+alfworld_zip/
+tensorboard_log/
+mlruns/
+mlflow.db
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

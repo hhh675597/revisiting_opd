@@ -87,6 +87,9 @@ actor_rollout_ref:
       reshard_after_forward: True # only for fsdp2, [True, False, int between 1 and fsdp_size]
       fsdp_size: -1
   ref:
+    model:
+      path: ~/models/deepseek-llm-7b-chat # teacher model path used in opd
+      trust_remote_code: False
     strategy: fsdp
     fsdp_config:
       param_offload: False

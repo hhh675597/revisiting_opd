@@ -712,3 +712,72 @@ def compute_pf_ppo_reweight_data(
     resampled_data.meta_info = resampled_meta_info
 
     return resampled_data
+
+def compute_opd_advantage(
+        data,
+        gamma: float = 0.0, 
+        reward_weight: float = 0.0,
+        multi_turn: bool = True,
+):
+    """Compute advantage as the difference between teacher and student log-probabilities, possibly combined with outcome reward.
+
+    Args:
+        data: DataProto object, containing batch, non_tensor_batch and meta_info
+        gamma: float, discount factor for future rewards, used in seq-level opd(set to 0.0 for tok-level typical opd)
+        reward_weight: float, weight for outcome reward
+        multi_turn: bool, whether the data is multi-turn dialogue data
+    
+    Returns:
+        advantages: `(torch.Tensor)`
+            shape: (bs, response_length)
+        Returns: `(torch.Tensor)`
+            shape: (bs, response_length)
+    """
+    responses = data.batch["responses"]
+    response_length = responses.size(1)
+
+    token_level_scores = data.batch["token_level_scores"] # outcome reward at each token
+    batch_size = data.batch.batch_size[0]
+
+    if multi_turn:
+        loss_mask = data.batch["loss_mask"]
+        response_mask = loss_mask[:, -response_length:]
+    else:
+        attention_mask = data.batch["attention_mask"]
+        response_mask = attention_mask[:, -response_length:]
+    
+    student_log_probs = data.batch["old_log_probs"]
+    teacher_log_probs = data.batch["ref_log_prob"]
+    kl_divergence = kl_penalty(student_log_probs, teacher_log_probs, kl_penalty="kl")
+    kl_divergence = kl_divergence * response_mask
+
+    # compute discounted rewards for seq-level opd
+    if gamma > 0.0:
+        with torch.no_grad():
+            discounted_kl = torch.zeros_like(kl_divergence)
+            running_discounted_kl = torch.zeros(batch_size, device=kl_divergence.device)
+            for t in reversed(range(response_length)):
+                running_discounted_kl = kl_divergence[:, t] + gamma * running_discounted_kl
+                discounted_kl[:, t] = running_discounted_kl
+                # Reset after EOS
+                running_discounted_kl = running_discounted_kl * response_mask[:, t]
+        kl_divergence = discounted_kl
+    
+    # combine kl divergence and outcome reward
+    if reward_weight > 0.0:
+        # TODO: outcome reward hasn't been normalized for advantage here
+        token_level_rewards = -kl_divergence + reward_weight * token_level_scores 
+    else:
+        token_level_rewards = -kl_divergence
+    
+    data.batch["token_level_rewards"] = token_level_rewards
+    
+    advantages = token_level_rewards * response_mask # we do not use normalization here(?
+    returns = advantages
+    return advantages, returns
+
+# def compute_policy_opd(
+#     advantages,
+#     response_mask,
+# ):
+#     raise NotImplementedError

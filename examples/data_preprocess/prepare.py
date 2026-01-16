@@ -24,7 +24,7 @@ import argparse
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--mode', default='visual', choices=['visual', 'text'])
-    parser.add_argument('--local_dir', default='~/data/verl-agent/')
+    parser.add_argument('--local_dir', default='/data/home/zdhs0086/hhh/verl-agent/data/verl-agent/')
     parser.add_argument('--hdfs_dir', default=None)
     parser.add_argument('--train_data_size', default=256, type=int)
     parser.add_argument('--val_data_size', default=256, type=int)
