@@ -11,12 +11,12 @@ from verl.utils.hdfs_io import copy, makedirs
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--local_dir", default="~/data/verl_agent_math")
+    parser.add_argument("--local_dir", default="/data/home/zdhs0086/hhh/verl-agent/data/math_opd")
     parser.add_argument("--hdfs_dir", default=None)
 
     args = parser.parse_args()
 
-    train_dataset = datasets.load_dataset("aaabiao/dapo_filter", split="train")
+    train_dataset = datasets.load_dataset("/data/home/zdhs0086/hhh/verl-agent/data/math_ori/train.parquet", split="train")
     test_dataset_aime24 = datasets.load_dataset("HuggingFaceH4/aime_2024", split="train")
     test_dataset_aime25 = datasets.load_dataset("MathArena/aime_2025", split="train")
     test_dataset_math500 = datasets.load_dataset("HuggingFaceH4/MATH-500", split="test")
