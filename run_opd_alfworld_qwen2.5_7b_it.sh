@@ -1,5 +1,7 @@
 ray stop --force
 # ray start --head
+unset ROCR_VISIBLE_DEVICES
+unset HIP_VISIBLE_DEVICES
 
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export WANDB_MODE=offline
@@ -87,4 +89,5 @@ python3 -m verl.trainer.main_ppo \
     ray_init.num_cpus=96 \
     2>&1 | tee /data/home/zdhs0086/hhh/verl-agent/data/logs/alfworld/${exp_name}_${TIME_STAMP}.log
 
-# consider changing tp_size
+# default loss_agg_mode is token-mean, which is different from that of MiMo
+# 这里似乎有点问题, 需要再确认一下
