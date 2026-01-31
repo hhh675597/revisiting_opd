@@ -210,7 +210,14 @@ def create_rl_dataset(data_paths, data_config, tokenizer, processor):
         if not issubclass(dataset_cls, Dataset):
             raise TypeError(f"The custom dataset class '{data_config.custom_cls.name}' from '{data_config.custom_cls.path}' must inherit from torch.utils.data.Dataset")
     else:
-        dataset_cls = RLHFDataset
+        # Auto-detect multi-task mode
+        batching_mode = data_config.get("batching_mode", None)
+        if batching_mode in ["sequential", "mixed"]:
+            from verl.utils.dataset.multitask_rl_dataset import MultiTaskRLHFDataset
+            dataset_cls = MultiTaskRLHFDataset
+            print(f"Multi-task batching mode detected: {batching_mode}")
+        else:
+            dataset_cls = RLHFDataset
     print(f"Using dataset class: {dataset_cls.__name__}")
 
     dataset = dataset_cls(
@@ -235,8 +242,27 @@ def create_rl_sampler(data_config, dataset):
     """
     import torch
     from torch.utils.data import RandomSampler, SequentialSampler
+    
+    # Check if multi-task dataset with sequential batching
+    batching_mode = data_config.get("batching_mode", None)
+    if batching_mode == "sequential":
+        from verl.utils.dataset.multitask_rl_dataset import MultiTaskRLHFDataset
+        
+        if isinstance(dataset, MultiTaskRLHFDataset):
+            print(f"Using SequentialTaskSampler for multi-task sequential batching")
+            from verl.utils.dataset.multitask_rl_dataset import SequentialTaskSampler
+            
+            batch_size = data_config.get("gen_batch_size", data_config.train_batch_size)
+            sampler = SequentialTaskSampler(
+                dataset=dataset,
+                batch_size=batch_size,
+                shuffle=data_config.shuffle,
+                drop_last=False,
+                seed=data_config.get("seed", 42),
+            )
+            return sampler
 
-    # use sampler for better ckpt resume
+    # Standard samplers for single-task
     if data_config.shuffle:
         train_dataloader_generator = torch.Generator()
         train_dataloader_generator.manual_seed(data_config.get("seed", 1))

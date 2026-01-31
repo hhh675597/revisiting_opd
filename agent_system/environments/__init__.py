@@ -13,4 +13,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from agent_system.environments.env_manager import EnvironmentManagerBase, make_envs
+from agent_system.environments.env_manager import EnvironmentManagerBase, make_envs, make_multitask_envs

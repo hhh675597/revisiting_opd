@@ -619,6 +619,27 @@ class RayPPOTrainer:
         if val_batch_size is None:
             val_batch_size = len(self.val_dataset)
 
+        # check if we need a multi-task sampler
+        batching_mode = self.config.data.get("batching_mode", None)
+        if batching_mode == "sequential":
+            from verl.utils.dataset.multitask_rl_dataset import (
+                MultiTaskRLHFDataset,
+                SequentialTaskSampler,
+            )
+
+            if isinstance(self.val_dataset, MultiTaskRLHFDataset):
+                val_sampler = SequentialTaskSampler(
+                    dataset=self.val_dataset,
+                    batch_size=val_batch_size,
+                    shuffle=False,
+                    drop_last=False,
+                    seed=self.config.data.get("seed", 42),
+                )
+            else:
+                val_sampler = None
+        else:
+            val_sampler = None
+
         self.val_dataloader = StatefulDataLoader(
             dataset=self.val_dataset,
             batch_size=val_batch_size,
@@ -626,6 +647,7 @@ class RayPPOTrainer:
             shuffle=False,
             drop_last=False,
             collate_fn=collate_fn,
+            sampler=val_sampler,
         )
 
         assert len(self.train_dataloader) >= 1, "Train dataloader is empty!"

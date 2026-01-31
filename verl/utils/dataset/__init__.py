@@ -15,5 +15,21 @@
 from .rl_dataset import RLHFDataset
 from .rm_dataset import RMDataset
 from .sft_dataset import SFTDataset
+from .multitask_rl_dataset import (
+    MultiTaskRLHFDataset,
+    SequentialTaskSampler,
+    TaskGroupedBatchSampler,
+    create_multitask_dataloader,
+    multitask_collate_fn,
+)
 
-__all__ = ["RLHFDataset", "RMDataset", "SFTDataset"]
+__all__ = [
+    "RLHFDataset",
+    "RMDataset",
+    "SFTDataset",
+    "MultiTaskRLHFDataset",
+    "SequentialTaskSampler",
+    "TaskGroupedBatchSampler",
+    "create_multitask_dataloader",
+    "multitask_collate_fn",
+]

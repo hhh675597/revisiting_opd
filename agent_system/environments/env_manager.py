@@ -22,7 +22,7 @@ import os
 from agent_system.environments.prompts import *
 from agent_system.environments.base import EnvironmentManagerBase, to_numpy
 from agent_system.memory import SimpleMemory, SearchMemory
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, DictConfig
 
 def parse_gamefile(infos):
     gamefile = []
@@ -671,6 +671,21 @@ def make_envs(config):
     """
     Create enviroments 
     """ 
+    # Check for multi-task mode
+    if hasattr(config, 'multitask') and config.multitask.get('enable', False):
+        print("[make_envs] Multi-task mode enabled, using make_multitask_envs")
+        return make_multitask_envs(config)
+    
+    # Check if env_name is "multitask" (alternative way to enable multi-task, not that clean implementation)
+    if config.env.env_name == "multitask":
+        print("[make_envs] env_name=multitask detected, using make_multitask_envs")
+        if not hasattr(config, 'multitask') or not config.multitask.get('enable', False):
+            print("  Warning: env_name=multitask but multitask.enable=False, enabling now")
+            if not hasattr(config, 'multitask'):
+                config.multitask = {}
+            config.multitask['enable'] = True
+        return make_multitask_envs(config)
+    
     # check if config.env.rollout.n is an integer
     if not isinstance(config.env.rollout.n, int):
         raise ValueError("config.env.rollout.n should be an integer")
@@ -774,3 +789,119 @@ def make_envs(config):
     else:
         print("Environment not supported")
         exit(1)
+
+
+def make_multitask_envs(config):
+    """
+    Create multi-task environments for on-policy distillation training.
+    
+    This function creates separate environment managers for each task type
+    (i.e., alfworld, math) and wraps them in a MultiEnvironmentManager that
+    routes interactions based on task_type field.
+    
+    Args:
+        config: Configuration with multitask section defining tasks
+    
+    Returns:
+        envs: MultiEnvironmentManager for training
+        val_envs: MultiEnvironmentManager for validation
+    """
+    from agent_system.environments.multitask_env_manager import MultiEnvironmentManager
+    
+    if not hasattr(config, 'multitask') or not config.multitask.get('enable', False):
+        raise ValueError("Multi-task training requires config.multitask.enable=True")
+    
+    # Parse tasks from config
+    tasks = config.multitask.get('tasks', [])
+    if not tasks:
+        raise ValueError("No tasks defined in config.multitask.tasks")
+    
+    # Get common parameters
+    resources_per_worker = OmegaConf.to_container(config.env.resources_per_worker, resolve=True)
+    group_n = config.env.rollout.n if config.env.rollout.n > 0 else 1
+    
+    train_env_managers = {}
+    val_env_managers = {}
+    
+    # Create environment managers for each task
+    if OmegaConf.is_config(tasks) and isinstance(tasks, DictConfig):
+        tasks = tasks.values()
+        
+    for task_config in tasks:
+        task_name = task_config.get('name')
+        env_name = task_config.get('env_name')
+        
+        if not task_name or not env_name:
+            raise ValueError(f"Task config missing 'name' or 'env_name': {task_config}")
+        
+        print(f"[MultiTask] Creating environment for task '{task_name}' (env: {env_name})")
+        
+        # Route to appropriate environment builder
+        if "alfworld" in env_name.lower():
+            from agent_system.environments.env_package.alfworld import build_alfworld_envs, alfworld_projection
+            
+            # Get AlfWorld config path
+            if env_name == 'alfworld/AlfredThorEnv':
+                alf_config_path = os.path.join(os.path.dirname(__file__), 'env_package/alfworld/configs/config_tw.yaml')
+            elif env_name == 'alfworld/AlfredTWEnv':
+                alf_config_path = os.path.join(os.path.dirname(__file__), 'env_package/alfworld/configs/config_tw.yaml')
+            else:
+                raise ValueError(f"Unsupported AlfWorld environment: {env_name}")
+            
+            env_kwargs = {
+                'eval_dataset': task_config.get('eval_dataset', 'eval_in_distribution'),
+            }
+            
+            _train_envs = build_alfworld_envs(
+                alf_config_path,
+                config.env.seed,
+                config.data.train_batch_size,
+                group_n,
+                is_train=True,
+                env_kwargs=env_kwargs,
+                resources_per_worker=resources_per_worker
+            )
+            _val_envs = build_alfworld_envs(
+                alf_config_path,
+                config.env.seed + 1000,
+                config.data.val_batch_size,
+                1,
+                is_train=False,
+                env_kwargs=env_kwargs,
+                resources_per_worker=resources_per_worker
+            )
+            
+            projection_f = partial(alfworld_projection)
+            train_env_managers[task_name] = AlfWorldEnvironmentManager(_train_envs, projection_f, config)
+            val_env_managers[task_name] = AlfWorldEnvironmentManager(_val_envs, projection_f, config)
+        
+        elif "math" in env_name.lower():
+            from agent_system.environments.env_package.math import build_math_envs, math_projection
+            
+            _train_envs = build_math_envs(
+                seed=config.env.seed,
+                env_num=config.data.train_batch_size,
+                group_n=group_n,
+                is_train=True
+            )
+            _val_envs = build_math_envs(
+                seed=config.env.seed + 1000,
+                env_num=config.data.val_batch_size,
+                group_n=1,
+                is_train=False
+            )
+            
+            projection_f = partial(math_projection)
+            train_env_managers[task_name] = MathEnvironmentManager(_train_envs, projection_f, config)
+            val_env_managers[task_name] = MathEnvironmentManager(_val_envs, projection_f, config)
+        
+        else:
+            raise ValueError(f"Unsupported environment type in make_multitask_envs: {env_name}")
+    
+    # Wrap in MultiEnvironmentManager
+    train_multi_env = MultiEnvironmentManager(train_env_managers, config)
+    val_multi_env = MultiEnvironmentManager(val_env_managers, config)
+    
+    print(f"[MultiTask] Created environment managers for tasks: {list(train_env_managers.keys())}")
+    
+    return train_multi_env, val_multi_env
