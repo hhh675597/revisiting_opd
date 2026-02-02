@@ -139,7 +139,13 @@ class TaskRunner:
 
         # use reference model
         if config.algorithm.use_kl_in_reward or config.actor_rollout_ref.actor.use_kl_loss:
-            role_worker_mapping[Role.RefPolicy] = ray.remote(ActorRolloutRefWorker)
+            # Check if multi-task mode is enabled
+            if hasattr(config, 'multitask') and config.multitask.get('enable', False):
+                print("[main_ppo] Multi-task mode detected, using MultiTaskRefWorker")
+                from verl.workers.multitask_ref_worker import MultiTaskRefWorker
+                role_worker_mapping[Role.RefPolicy] = ray.remote(MultiTaskRefWorker)
+            else:
+                role_worker_mapping[Role.RefPolicy] = ray.remote(ActorRolloutRefWorker)
             mapping[Role.RefPolicy] = global_pool_id
 
         reward_manager_name = config.reward_model.get("reward_manager", "episode")

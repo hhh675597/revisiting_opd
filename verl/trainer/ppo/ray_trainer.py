@@ -470,6 +470,10 @@ class RayPPOTrainer:
         else:
             raise NotImplementedError
 
+        if OmegaConf.select(self.config, 'multitask'):
+            with open_dict(self.config.actor_rollout_ref):
+                self.config.actor_rollout_ref.multitask = self.config.multitask 
+
         self._validate_config()
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
 
