@@ -148,9 +148,9 @@ class MultiEnvironmentManager(EnvironmentManagerBase):
         all_dones = [None] * self.batch_size
         all_infos = [None] * self.batch_size
 
-        print(f"[DBG] step() called with {len(text_actions)} actions")
-        print(f"[DBG] Task distribution: {[(k, len(v)) for k, v in task_actions.items()]}")
-        print(f"[DBG] Task env expects: {[((k, v.envs.num_processes) if hasattr(v.envs, 'num_processes') else (k, 'N/A')) for k, v in self.env_managers.items()]}")
+        # print(f"[DBG] step() called with {len(text_actions)} actions")
+        # print(f"[DBG] Task distribution: {[(k, len(v)) for k, v in task_actions.items()]}")
+        # print(f"[DBG] Task env expects: {[((k, v.envs.num_processes) if hasattr(v.envs, 'num_processes') else (k, 'N/A')) for k, v in self.env_managers.items()]}")
         
         # Step each task's environment manager
         for task_type, actions in task_actions.items():

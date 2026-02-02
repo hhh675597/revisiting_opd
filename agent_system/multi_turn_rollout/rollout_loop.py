@@ -62,6 +62,7 @@ class TrajectoryCollector:
         raw_prompt = gen_batch.non_tensor_batch['raw_prompt'][item]
         data_source = gen_batch.non_tensor_batch['data_source'][item]
         apply_chat_template_kwargs = self.config.data.get("apply_chat_template_kwargs", {})
+        task_type = gen_batch.non_tensor_batch.get("task_type", [None] * len(gen_batch.batch))[item]
         
         # Get observation components
         obs_texts = obs.get('text', None)
@@ -179,7 +180,8 @@ class TrajectoryCollector:
             'raw_prompt_ids': raw_prompt_ids,
             'anchor_obs': _obs_anchor,
             'index': item,
-            'data_source': data_source
+            'data_source': data_source,
+            'task_type': task_type,
         })
 
         if self.config.data.get('return_raw_chat', False):
@@ -342,6 +344,8 @@ class TrajectoryCollector:
                 non_tensor_batch_keys_to_pop.append("raw_prompt")
             if "tools_kwargs" in batch.non_tensor_batch:
                 non_tensor_batch_keys_to_pop.append("tools_kwargs")
+            if "task_type" in batch.non_tensor_batch:
+                non_tensor_batch_keys_to_pop.append("task_type")
             batch_input = batch.pop(
                 batch_keys=batch_keys_to_pop,
                 non_tensor_batch_keys=non_tensor_batch_keys_to_pop,

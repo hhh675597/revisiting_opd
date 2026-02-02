@@ -1095,6 +1095,7 @@ class RayPPOTrainer:
                 # pop those keys for generation
                 batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
                 non_tensor_batch_keys_to_pop = ["raw_prompt_ids", "data_source"]
+                # print(f"[DBG] {batch.non_tensor_batch.keys()=}") # [DBG] batch.non_tensor_batch.keys()=dict_keys(['task_type', 'data_source', 'env_kwargs', 'extra_info', 'ability', 'reward_model', 'raw_prompt_ids', 'raw_prompt', 'index', 'tools_kwargs'])
                 if "multi_modal_data" in batch.non_tensor_batch:
                     non_tensor_batch_keys_to_pop.append("multi_modal_data")
                 if "raw_prompt" in batch.non_tensor_batch:
@@ -1103,6 +1104,8 @@ class RayPPOTrainer:
                     non_tensor_batch_keys_to_pop.append("tools_kwargs")
                 if "env_kwargs" in batch.non_tensor_batch:
                     non_tensor_batch_keys_to_pop.append("env_kwargs")
+                if "task_type" in batch.non_tensor_batch:
+                    non_tensor_batch_keys_to_pop.append("task_type")
                 gen_batch = batch.pop(
                     batch_keys=batch_keys_to_pop,
                     non_tensor_batch_keys=non_tensor_batch_keys_to_pop,

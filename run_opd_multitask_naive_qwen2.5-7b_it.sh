@@ -1,3 +1,6 @@
+# in this experiment, we rollout one task at a time
+# e.g., step1:math->step2:alfworld->step3:math->...
+
 # only for testing multi-task dataload & rollout
 
 ray stop --force
@@ -10,7 +13,7 @@ export RAY_worker_register_timeout_seconds=600
 
 TIME_STAMP=$(date +"%m%d_%H%M%S")
 project_name='multitask_opd'
-exp_name='test_multi_teacher'
+exp_name='multitask-opd-naive-qwen2.5-7b-it'
 
 set -x
 ENGINE=${1:-vllm}
@@ -35,7 +38,7 @@ MATH_TEACHER="/data/home/zdhs0086/hhh/verl-agent/models/OpenThinker3-7B"
 
 
 python3 -m verl.trainer.main_ppo_multitask \
-    algorithm.adv_estimator=grpo \
+    algorithm.adv_estimator=opd \
     +algorithm.opd.gamma=0.0 \
     +algorithm.opd.reward_weight=0.0 \
     +multitask.enable=true \
@@ -63,30 +66,30 @@ python3 -m verl.trainer.main_ppo_multitask \
     actor_rollout_ref.actor.ppo_mini_batch_size=64 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=4 \
     actor_rollout_ref.actor.entropy_coeff=0.0 \
-    actor_rollout_ref.actor.use_kl_loss=False \
+    actor_rollout_ref.actor.use_kl_loss=True \
     actor_rollout_ref.actor.kl_loss_coef=0.0 \
     actor_rollout_ref.actor.kl_loss_type=kl \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
-    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=16 \
+    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=8 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.name=${ENGINE} \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.7 \
     actor_rollout_ref.rollout.enable_chunked_prefill=False \
     actor_rollout_ref.rollout.max_num_batched_tokens=$((2048 + 16384)) \
     actor_rollout_ref.rollout.enforce_eager=False \
     actor_rollout_ref.rollout.free_cache_engine=False \
     actor_rollout_ref.rollout.val_kwargs.temperature=0.4 \
     actor_rollout_ref.rollout.val_kwargs.do_sample=True \
-    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=32 \
+    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=8 \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.use_invalid_action_penalty=False \
     actor_rollout_ref.actor.invalid_action_penalty_coef=0.0 \
     algorithm.use_kl_in_reward=True \
     env.env_name=multitask \
     env.seed=0 \
-    env.max_steps=50 \
+    env.max_steps=30 \
     env.rollout.n=${group_size} \
     env.resources_per_worker.num_cpus=${num_cpus_per_env_worker} \
     trainer.critic_warmup=0 \
@@ -98,7 +101,7 @@ python3 -m verl.trainer.main_ppo_multitask \
     trainer.save_freq=10 \
     trainer.test_freq=10 \
     trainer.total_epochs=1 \
-    trainer.val_before_train=False \
+    trainer.val_before_train=True \
     trainer.val_only=False \
     trainer.default_local_dir="${CKPTS_DIR}" \
     trainer.resume_mode=auto \
