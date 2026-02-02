@@ -16,15 +16,15 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    train_dataset = datasets.load_dataset("/data/home/zdhs0086/hhh/verl-agent/data/math_ori/train.parquet", split="train")
-    test_dataset_aime24 = datasets.load_dataset("HuggingFaceH4/aime_2024", split="train")
-    test_dataset_aime25 = datasets.load_dataset("MathArena/aime_2025", split="train")
-    test_dataset_math500 = datasets.load_dataset("HuggingFaceH4/MATH-500", split="test")
-    test_dataset_math500_first50 = test_dataset_math500.select(range(50))
+    # train_dataset = datasets.load_dataset("/data/home/zdhs0086/hhh/verl-agent/data/math_ori/train.parquet", split="train")
+    test_dataset_aime24 = datasets.load_dataset("Maxwell-Jia/AIME_2024", split="train")
+    # test_dataset_aime25 = datasets.load_dataset("MathArena/aime_2025", split="train")
+    # test_dataset_math500 = datasets.load_dataset("HuggingFaceH4/MATH-500", split="test")
+    # test_dataset_math500_first50 = test_dataset_math500.select(range(50))
 
-    test_dataset_amc23 = datasets.load_dataset("knoveleng/AMC-23", split="train")
-    test_dataset_minerva = datasets.load_dataset("zwhe99/simplerl-minerva-math", split="test")
-    test_dataset_olympiadbench = datasets.load_dataset("realtreetune/olympiadbench", split="test")
+    # test_dataset_amc23 = datasets.load_dataset("knoveleng/AMC-23", split="train")
+    # test_dataset_minerva = datasets.load_dataset("zwhe99/simplerl-minerva-math", split="test")
+    # test_dataset_olympiadbench = datasets.load_dataset("realtreetune/olympiadbench", split="test")
     # instruction_following = (
     #     r"You FIRST think about the reasoning process as an internal monologue and then provide the final answer. "
     #     r"The reasoning process MUST BE enclosed within <think> </think> tags. "
@@ -71,9 +71,9 @@ if __name__ == "__main__":
 
     def make_map_fn_test(split, data_source):
         def process_fn(example, idx):
-            question = example.pop("problem")
+            question = example.pop("Problem")
             ability = "math"
-            ground_truth = example.pop("answer")
+            ground_truth = example.pop("Answer")
             # change type of ground_truth to string if it is not
             if not isinstance(ground_truth, str):
                 ground_truth = str(ground_truth)
@@ -100,26 +100,29 @@ if __name__ == "__main__":
 
         return process_fn
 
-    train_dataset = train_dataset.map(function=make_map_fn("train", "dapo_filter"), with_indices=True)
+    # train_dataset = train_dataset.map(function=make_map_fn("train", "dapo_filter"), with_indices=True)
     test_dataset_aime24 = test_dataset_aime24.map(function=make_map_fn_test("test", "aime24"), with_indices=True)
-    test_dataset_aime25 = test_dataset_aime25.map(function=make_map_fn_test("test", "aime25"), with_indices=True)
-    test_dataset_math500 = test_dataset_math500.map(function=make_map_fn_test("test", "math500"), with_indices=True)
-    test_dataset_math500_first50 = test_dataset_math500_first50.map(function=make_map_fn_test("test", "math500_first50"), with_indices=True)
-    test_dataset_amc23 = test_dataset_amc23.map(function=make_map_fn_test("test", "amc23"), with_indices=True)
-    test_dataset_minerva = test_dataset_minerva.map(function=make_map_fn_test("test", "minerva"), with_indices=True)
-    test_dataset_olympiadbench = test_dataset_olympiadbench.map(function=make_map_fn_test("test", "olympiadbench"), with_indices=True)
+    # test_dataset_aime25 = test_dataset_aime25.map(function=make_map_fn_test("test", "aime25"), with_indices=True)
+    # test_dataset_math500 = test_dataset_math500.map(function=make_map_fn_test("test", "math500"), with_indices=True)
+    # test_dataset_math500_first50 = test_dataset_math500_first50.map(function=make_map_fn_test("test", "math500_first50"), with_indices=True)
+    # test_dataset_amc23 = test_dataset_amc23.map(function=make_map_fn_test("test", "amc23"), with_indices=True)
+    # test_dataset_minerva = test_dataset_minerva.map(function=make_map_fn_test("test", "minerva"), with_indices=True)
+    # test_dataset_olympiadbench = test_dataset_olympiadbench.map(function=make_map_fn_test("test", "olympiadbench"), with_indices=True)
 
     local_dir = args.local_dir
     hdfs_dir = args.hdfs_dir
 
-    test_dataset_sampled = concatenate_datasets([test_dataset_math500_first50, test_dataset_aime24, test_dataset_aime25])
-    print(f"Combined test_dataset_sampled length: {len(test_dataset_sampled)}")
+    # test_dataset_sampled = concatenate_datasets([test_dataset_math500_first50, test_dataset_aime24, test_dataset_aime25])
+    # print(f"Combined test_dataset_sampled length: {len(test_dataset_sampled)}")
 
-    test_dataset_full = concatenate_datasets([test_dataset_math500,test_dataset_aime24, test_dataset_aime25, test_dataset_olympiadbench, test_dataset_amc23, test_dataset_minerva])
-    print(f"Combined test_dataset_full length: {len(test_dataset_full)}")
+    # test_dataset_full = concatenate_datasets([test_dataset_math500,test_dataset_aime24, test_dataset_aime25, test_dataset_olympiadbench, test_dataset_amc23, test_dataset_minerva])
+    # print(f"Combined test_dataset_full length: {len(test_dataset_full)}")
 
-    train_dataset.to_parquet(os.path.join(local_dir, "train.parquet"))
-    test_dataset_sampled.to_parquet(os.path.join(local_dir, "test_sampled.parquet"))
+
+    # test_dataset_sampled = test_dataset_aime24
+    test_dataset_full = test_dataset_aime24
+    # train_dataset.to_parquet(os.path.join(local_dir, "train.parquet"))
+    # test_dataset_sampled.to_parquet(os.path.join(local_dir, "test_sampled.parquet"))
     test_dataset_full.to_parquet(os.path.join(local_dir, "test.parquet"))
 
     if hdfs_dir is not None:

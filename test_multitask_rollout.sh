@@ -10,7 +10,7 @@ export RAY_worker_register_timeout_seconds=600
 
 TIME_STAMP=$(date +"%m%d_%H%M%S")
 project_name='multitask_opd'
-exp_name='test_dataload_rollout'
+exp_name='test_multi_teacher'
 
 set -x
 ENGINE=${1:-vllm}
@@ -31,7 +31,7 @@ VAL_DATA="${MULTITASK_DATA_DIR}/test.parquet"
 
 STUDENT_MODEL="/data/home/zdhs0086/hhh/verl-agent/models/Qwen2.5-7B-Instruct"
 ALFWORLD_TEACHER="/data/home/zdhs0086/hhh/verl-agent/models/alfworld-teacher-gigpo-qwen2.5-7b"
-# test with one referece model here
+MATH_TEACHER="/data/home/zdhs0086/hhh/verl-agent/models/OpenThinker3-7B"
 
 
 python3 -m verl.trainer.main_ppo \
@@ -42,11 +42,11 @@ python3 -m verl.trainer.main_ppo \
     +multitask.batching_mode=sequential \
     +multitask.tasks.task0.name=alfworld \
     +multitask.tasks.task0.env_name=alfworld/AlfredTWEnv \
-    actor_rollout_ref.ref.model.path=/data/home/zdhs0086/hhh/verl-agent/models/alfworld-teacher-gigpo-qwen2.5-7b \
+    +multitask.tasks.task0.ref_model_path=${ALFWORLD_TEACHER} \
     +multitask.tasks.task0.eval_dataset=eval_in_distribution \
     +multitask.tasks.task1.name=math \
     +multitask.tasks.task1.env_name=math \
-    +multitask.tasks.task1.ref_model_path=${ALFWORLD_TEACHER} \
+    +multitask.tasks.task1.ref_model_path=${MATH_TEACHER} \
     data.train_files=${TRAIN_DATA} \
     data.val_files=${VAL_DATA} \
     data.train_batch_size=${train_data_size} \
@@ -63,7 +63,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.ppo_mini_batch_size=64 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=4 \
     actor_rollout_ref.actor.entropy_coeff=0.0 \
-    actor_rollout_ref.actor.use_kl_loss=True \
+    actor_rollout_ref.actor.use_kl_loss=False \
     actor_rollout_ref.actor.kl_loss_coef=0.0 \
     actor_rollout_ref.actor.kl_loss_type=kl \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
@@ -95,11 +95,11 @@ python3 -m verl.trainer.main_ppo \
     trainer.experiment_name="${exp_name}" \
     trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \
-    trainer.save_freq=50 \
+    trainer.save_freq=10 \
     trainer.test_freq=10 \
     trainer.total_epochs=1 \
     trainer.val_before_train=True \
-    trainer.val_only=True \
+    trainer.val_only=False \
     trainer.default_local_dir="${CKPTS_DIR}" \
     trainer.resume_mode=auto \
     ray_init.num_cpus=96 \

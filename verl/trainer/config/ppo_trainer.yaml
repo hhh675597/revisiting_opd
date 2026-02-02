@@ -26,6 +26,7 @@ data:
 
 actor_rollout_ref:
   hybrid_engine: True
+  multitask: null # just add for compatibility
   model:
     path: ~/models/deepseek-llm-7b-chat
     use_shm: False
