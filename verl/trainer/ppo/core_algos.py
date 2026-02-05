@@ -713,11 +713,48 @@ def compute_pf_ppo_reweight_data(
 
     return resampled_data
 
+def compute_topk_kl_divergence(
+    teacher_topk_log_probs: torch.Tensor,
+    student_topk_log_probs: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Compute approximate KL divergence using top-k tokens from teacher.
+    
+    KL(student || teacher) ≈ sum_{w in top-k} student_norm(w) * (log student_norm(w) - log teacher_norm(w))
+    
+    We normalize both distributions over the top-k tokens to get proper probability distributions.
+    
+    Args:
+        teacher_topk_log_probs: (batch_size, response_length, k) - teacher's log probs for top-k tokens
+        student_topk_log_probs: (batch_size, response_length, k) - student's log probs for same top-k tokens
+    
+    Returns:
+        kl_divergence: (batch_size, response_length) - per-token KL divergence
+    """
+    # Convert to probabilities
+    teacher_probs = torch.exp(teacher_topk_log_probs)  # (bs, resp_len, k)
+    student_probs = torch.exp(student_topk_log_probs)  # (bs, resp_len, k)
+    
+    # Normalize both distributions over top-k to get proper probability distributions
+    teacher_probs_norm = teacher_probs / (teacher_probs.sum(dim=-1, keepdim=True) + 1e-10)
+    student_probs_norm = student_probs / (student_probs.sum(dim=-1, keepdim=True) + 1e-10)
+    
+    # Compute log of normalized probs (with numerical stability)
+    teacher_log_probs_norm = torch.log(teacher_probs_norm + 1e-10)
+    student_log_probs_norm = torch.log(student_probs_norm + 1e-10)
+    
+    # KL(student || teacher) = sum_k student_norm(k) * (log student_norm(k) - log teacher_norm(k))
+    kl_per_token = (student_probs_norm * (student_log_probs_norm - teacher_log_probs_norm)).sum(dim=-1)
+    
+    return kl_per_token
+
+
 def compute_opd_advantage(
         data,
         gamma: float = 0.0, 
         reward_weight: float = 0.0,
         multi_turn: bool = True,
+        use_topk_kl: bool = False,
 ):
     """Compute advantage as the difference between teacher and student log-probabilities, possibly combined with outcome reward.
 
@@ -726,6 +763,7 @@ def compute_opd_advantage(
         gamma: float, discount factor for future rewards, used in seq-level opd(set to 0.0 for tok-level typical opd)
         reward_weight: float, weight for outcome reward
         multi_turn: bool, whether the data is multi-turn dialogue data
+        use_topk_kl: bool, whether to use top-k KL divergence (requires teacher_topk_log_probs and student_topk_log_probs in batch)
     
     Returns:
         advantages: `(torch.Tensor)`
@@ -746,9 +784,18 @@ def compute_opd_advantage(
         attention_mask = data.batch["attention_mask"]
         response_mask = attention_mask[:, -response_length:]
     
-    student_log_probs = data.batch["old_log_probs"]
-    teacher_log_probs = data.batch["ref_log_prob"]
-    kl_divergence = kl_penalty(student_log_probs, teacher_log_probs, kl_penalty="kl")
+    # Compute KL divergence
+    if use_topk_kl and "teacher_topk_log_probs" in data.batch and "student_topk_log_probs" in data.batch:
+        # Use true top-k KL divergence
+        teacher_topk_log_probs = data.batch["teacher_topk_log_probs"]  # (bs, resp_len, k)
+        student_topk_log_probs = data.batch["student_topk_log_probs"]  # (bs, resp_len, k)
+        kl_divergence = compute_topk_kl_divergence(teacher_topk_log_probs, student_topk_log_probs)
+    else:
+        # Use approximate KL based on selected token only
+        student_log_probs = data.batch["old_log_probs"]
+        teacher_log_probs = data.batch["ref_log_prob"]
+        kl_divergence = kl_penalty(student_log_probs, teacher_log_probs, kl_penalty="kl")
+    
     kl_divergence = kl_divergence * response_mask
 
     # compute discounted rewards for seq-level opd

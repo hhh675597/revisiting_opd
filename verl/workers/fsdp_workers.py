@@ -752,6 +752,146 @@ class ActorRolloutRefWorker(Worker):
 
         return output
 
+    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+    def compute_log_prob_with_topk(self, data: DataProto):
+        """Compute log probabilities along with top-k token indices and their log probs.
+        
+        Used for OPD with true KL divergence calculation.
+        topk_k should be passed via data.meta_info["topk_k"]
+        """
+        assert self._is_actor
+        if self._is_offload_param:
+            load_fsdp_model_to_gpu(self.actor_module_fsdp)
+
+        data = data.to(get_torch_device().current_device())
+        
+        # Get topk_k from meta_info
+        topk_k = data.meta_info.get("topk_k", 50)
+
+        if self._is_lora:
+            adapter_ctx = self.lora_adapter
+        else:
+            from contextlib import nullcontext
+            adapter_ctx = nullcontext()
+
+        # use the micro_batch_size and max_token_len in actor for compute log_prob
+        data.meta_info["micro_batch_size"] = self.config.actor.ppo_micro_batch_size_per_gpu
+        data.meta_info["max_token_len"] = self.config.actor.ppo_max_token_len_per_gpu
+        data.meta_info["use_dynamic_bsz"] = self.config.actor.use_dynamic_bsz
+        data.meta_info["temperature"] = self.config.rollout.temperature
+        
+        with self.ulysses_sharding_manager:
+            data = self.ulysses_sharding_manager.preprocess_data(data)
+            with adapter_ctx:
+                result = self.actor.compute_log_prob_with_topk(data=data, topk_k=topk_k)
+            output = DataProto.from_dict(
+                tensors={
+                    "old_log_probs": result["log_probs"],
+                    "teacher_topk_indices": result["topk_indices"],
+                    "teacher_topk_log_probs": result["topk_log_probs"],
+                },
+            )
+            output = self.ulysses_sharding_manager.postprocess_data(output)
+
+        output = output.to("cpu")
+
+        if self.world_size > 1 and fsdp_version(self.actor.actor_module) == 1:
+            self.actor.actor_module._handle.reshard(True)
+
+        if self._is_offload_param:
+            offload_fsdp_model_to_cpu(self.actor_module_fsdp)
+
+        return output
+
+    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+    def compute_ref_log_prob_with_topk(self, data: DataProto):
+        """Compute ref log probs along with top-k for true KL divergence in OPD.
+        
+        topk_k should be passed via data.meta_info["topk_k"]
+        """
+        # Get topk_k from meta_info
+        topk_k = data.meta_info.get("topk_k", 50)
+        
+        if self._is_lora:
+            data.meta_info['is_lora'] = True
+            result = self.compute_log_prob_with_topk(data)
+            return DataProto.from_dict(tensors={
+                'ref_log_prob': result.batch['old_log_probs'],
+                'teacher_topk_indices': result.batch['teacher_topk_indices'],
+                'teacher_topk_log_probs': result.batch['teacher_topk_log_probs'],
+            })
+        assert self._is_ref
+        
+        data = data.to(get_torch_device().current_device())
+
+        micro_batch_size = self.config.ref.log_prob_micro_batch_size_per_gpu
+        data.meta_info["micro_batch_size"] = micro_batch_size
+        data.meta_info["temperature"] = self.config.rollout.temperature
+        data.meta_info["max_token_len"] = self.config.ref.log_prob_max_token_len_per_gpu
+        data.meta_info["use_dynamic_bsz"] = self.config.ref.log_prob_use_dynamic_bsz
+        
+        with self.ulysses_sharding_manager:
+            data = self.ulysses_sharding_manager.preprocess_data(data)
+            result = self.ref_policy.compute_log_prob_with_topk(data=data, topk_k=topk_k)
+            output = DataProto.from_dict(tensors={
+                "ref_log_prob": result["log_probs"],
+                "teacher_topk_indices": result["topk_indices"],
+                "teacher_topk_log_probs": result["topk_log_probs"],
+            })
+            output = self.ulysses_sharding_manager.postprocess_data(output)
+
+        output = output.to("cpu")
+
+        if self.world_size > 1 and fsdp_version(self.ref_policy.actor_module) == 1:
+            self.ref_policy.actor_module._handle.reshard(True)
+
+        return output
+
+    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+    def compute_log_prob_for_topk_indices(self, data: DataProto):
+        """Compute student's log probs for teacher's top-k token indices.
+        
+        topk_indices should be in data.batch["teacher_topk_indices"]
+        """
+        assert self._is_actor
+        if self._is_offload_param:
+            load_fsdp_model_to_gpu(self.actor_module_fsdp)
+
+        data = data.to(get_torch_device().current_device())
+        
+        # Get topk_indices from batch (already split by dispatcher)
+        topk_indices = data.batch["teacher_topk_indices"]
+
+        if self._is_lora:
+            adapter_ctx = self.lora_adapter
+        else:
+            from contextlib import nullcontext
+            adapter_ctx = nullcontext()
+
+        data.meta_info["micro_batch_size"] = self.config.actor.ppo_micro_batch_size_per_gpu
+        data.meta_info["max_token_len"] = self.config.actor.ppo_max_token_len_per_gpu
+        data.meta_info["use_dynamic_bsz"] = self.config.actor.use_dynamic_bsz
+        data.meta_info["temperature"] = self.config.rollout.temperature
+        
+        with self.ulysses_sharding_manager:
+            data = self.ulysses_sharding_manager.preprocess_data(data)
+            with adapter_ctx:
+                student_topk_log_probs = self.actor.compute_log_prob_for_topk_indices(
+                    data=data, topk_indices=topk_indices
+                )
+            output = DataProto.from_dict(tensors={"student_topk_log_probs": student_topk_log_probs})
+            output = self.ulysses_sharding_manager.postprocess_data(output)
+
+        output = output.to("cpu")
+
+        if self.world_size > 1 and fsdp_version(self.actor.actor_module) == 1:
+            self.actor.actor_module._handle.reshard(True)
+
+        if self._is_offload_param:
+            offload_fsdp_model_to_cpu(self.actor_module_fsdp)
+
+        return output  # Return DataProto for consistency
+
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def save_checkpoint(self, local_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None):
         # only support save and load ckpt for actor

@@ -245,7 +245,7 @@ def compute_response_mask(data: DataProto):
     return attention_mask[:, -response_length:]
 
 
-def compute_advantage(data: DataProto, adv_estimator, gamma=0.0, lam=1.0, num_repeat=1, multi_turn=False, norm_adv_by_std_in_grpo=True, step_advantage_w=1.0, gigpo_mode="mean_std_norm", gigpo_enable_similarity=False, gigpo_similarity_thresh=0.95, reward_weight=0.0, **kwargs):
+def compute_advantage(data: DataProto, adv_estimator, gamma=0.0, lam=1.0, num_repeat=1, multi_turn=False, norm_adv_by_std_in_grpo=True, step_advantage_w=1.0, gigpo_mode="mean_std_norm", gigpo_enable_similarity=False, gigpo_similarity_thresh=0.95, reward_weight=0.0, use_opd_topk=False, **kwargs):
     """Compute advantage estimates for policy optimization.
 
     This function computes advantage estimates using various estimators like GAE, GRPO, REINFORCE++, etc.
@@ -369,6 +369,7 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=0.0, lam=1.0, num_re
             gamma=gamma, # discount factor for future rewards, used in seq-level opd(set to 0.0 for tok-level typical opd)
             reward_weight=reward_weight, # weight for outcome reward
             multi_turn=multi_turn, # whether multi-turn conversation
+            use_topk_kl=use_opd_topk, # whether to use top-k KL divergence (requires teacher_topk_log_probs and student_topk_log_probs)
             )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
@@ -1220,13 +1221,37 @@ class RayPPOTrainer:
                             )
 
                     if self.use_reference_policy:
+                        # Check if using OPD with top-k KL divergence
+                        use_opd_topk = (
+                            self.config.algorithm.adv_estimator == AdvantageEstimator.OPD and
+                            self.config.algorithm.get("opd", {}).get("topk", False)
+                        )
+                        opd_k = self.config.algorithm.get("opd", {}).get("k", 50)
+                        
                         # compute reference log_prob
                         with _timer("ref", timing_raw):
-                            if not self.ref_in_actor:
-                                ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
+                            if use_opd_topk:
+                                # Compute ref log prob with top-k for true KL divergence
+                                # Pass topk_k via meta_info (DP_COMPUTE_PROTO only accepts DataProto args)
+                                batch.meta_info["topk_k"] = opd_k
+                                if not self.ref_in_actor:
+                                    ref_log_prob = self.ref_policy_wg.compute_ref_log_prob_with_topk(batch)
+                                else:
+                                    ref_log_prob = self.actor_rollout_wg.compute_ref_log_prob_with_topk(batch)
                             else:
-                                ref_log_prob = self.actor_rollout_wg.compute_ref_log_prob(batch)
+                                if not self.ref_in_actor:
+                                    ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
+                                else:
+                                    ref_log_prob = self.actor_rollout_wg.compute_ref_log_prob(batch)
                             batch = batch.union(ref_log_prob)
+                        
+                        # Compute student's log probs for teacher's top-k indices if using OPD topk
+                        if use_opd_topk and "teacher_topk_indices" in batch.batch:
+                            with _timer("student_topk", timing_raw):
+                                # Pass topk_indices via batch tensor (will be split by dispatcher)
+                                # The indices are already in batch.batch from ref_log_prob union
+                                student_topk_output = self.actor_rollout_wg.compute_log_prob_for_topk_indices(batch)
+                                batch.batch["student_topk_log_probs"] = student_topk_output.batch["student_topk_log_probs"]
                         
                         # Visualize teacher vs student distributions
                         if self.config.trainer.get("visualize_distribution", False):
@@ -1316,7 +1341,9 @@ class RayPPOTrainer:
                                 batch,
                                 adv_estimator=self.config.algorithm.adv_estimator,
                                 gamma=self.config.algorithm.opd.get("gamma", 0.0),
-                                reward_weight=self.config.algorithm.opd.get("reward_weight", 0.0), # maybe add more args later
+                                reward_weight=self.config.algorithm.opd.get("reward_weight", 0.0),
+                                multi_turn=True,  # always multi_turn for agent system
+                                use_opd_topk=self.config.algorithm.opd.get("topk", False),
                             )
 
                     # update critic

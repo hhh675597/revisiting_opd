@@ -314,6 +314,390 @@ class DataParallelPPOActor(BasePPOActor):
         return log_probs, entropys
 
     @GPUMemoryLogger(role="dp actor", logger=logger)
+    def compute_log_prob_with_topk(self, data: DataProto, topk_k: int = 50) -> dict:
+        """Compute log probabilities along with top-k token indices and their log probs.
+        
+        Used for OPD with true KL divergence calculation.
+        
+        Args:
+            data: DataProto containing input_ids, attention_mask, position_ids, responses
+            topk_k: number of top tokens to extract
+            
+        Returns:
+            dict with keys:
+                - log_probs: (batch_size, response_length) - log probs for selected tokens
+                - topk_indices: (batch_size, response_length, k) - top-k token indices
+                - topk_log_probs: (batch_size, response_length, k) - log probs for top-k tokens
+        """
+        from verl.utils.torch_functional import topk_logprobs_from_logits
+        
+        self.actor_module.eval()
+        
+        micro_batch_size = data.meta_info["micro_batch_size"]
+        temperature = data.meta_info["temperature"]
+        use_dynamic_bsz = data.meta_info["use_dynamic_bsz"]
+        
+        select_keys = ["responses", "input_ids", "attention_mask", "position_ids"]
+        batch = data.select(batch_keys=select_keys).batch
+        has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
+        
+        if has_multi_modal_inputs:
+            num_micro_batches = data.batch.batch_size[0] // micro_batch_size
+            non_tensor_select_keys = ["multi_modal_inputs"]
+            micro_batches = data.select(select_keys, non_tensor_select_keys).chunk(num_micro_batches)
+        elif use_dynamic_bsz:
+            max_token_len = data.meta_info["max_token_len"] * self.ulysses_sequence_parallel_size
+            micro_batches, indices = rearrange_micro_batches(batch=batch, max_token_len=max_token_len)
+        else:
+            micro_batches = batch.split(micro_batch_size)
+        
+        log_probs_lst = []
+        topk_indices_lst = []
+        topk_log_probs_lst = []
+        
+        for micro_batch in micro_batches:
+            if isinstance(micro_batch, DataProto):
+                micro_batch = {**micro_batch.batch, **micro_batch.non_tensor_batch}
+            with torch.no_grad():
+                # Run forward with topk extraction
+                log_probs, topk_indices, topk_log_probs = self._forward_micro_batch_with_topk(
+                    micro_batch, temperature=temperature, topk_k=topk_k
+                )
+            log_probs_lst.append(log_probs)
+            topk_indices_lst.append(topk_indices)
+            topk_log_probs_lst.append(topk_log_probs)
+        
+        log_probs = torch.concat(log_probs_lst, dim=0)
+        topk_indices = torch.concat(topk_indices_lst, dim=0)
+        topk_log_probs = torch.concat(topk_log_probs_lst, dim=0)
+        
+        if use_dynamic_bsz:
+            indices = list(itertools.chain.from_iterable(indices))
+            revert_indices = torch.tensor(get_reverse_idx(indices), dtype=torch.long)
+            log_probs = log_probs[revert_indices]
+            topk_indices = topk_indices[revert_indices]
+            topk_log_probs = topk_log_probs[revert_indices]
+        
+        return {
+            "log_probs": log_probs,
+            "topk_indices": topk_indices,
+            "topk_log_probs": topk_log_probs,
+        }
+
+    def _forward_micro_batch_with_topk(self, micro_batch, temperature, topk_k=50):
+        """Forward pass that returns log probs for selected tokens AND top-k info.
+        
+        Follows the same rmpad pattern as _forward_micro_batch for memory efficiency.
+        """
+        from verl.utils.torch_functional import topk_logprobs_from_logits, logprobs_from_logits
+        
+        response_length = micro_batch["responses"].size(-1)
+        multi_modal_inputs = {}
+        if "multi_modal_inputs" in micro_batch:
+            for key in micro_batch["multi_modal_inputs"][0].keys():
+                multi_modal_inputs[key] = torch.cat([inputs[key] for inputs in micro_batch["multi_modal_inputs"]], dim=0)
+
+        with torch.autocast(device_type=self.device_name, dtype=torch.bfloat16):
+            input_ids = micro_batch["input_ids"]
+            batch_size, seqlen = input_ids.shape
+            attention_mask = micro_batch["attention_mask"]
+            position_ids = micro_batch["position_ids"]
+            
+            if position_ids.dim() == 3:  # qwen2vl mrope
+                position_ids = position_ids.transpose(0, 1)  # (bsz, 4, seqlen) -> (4, bsz, seqlen)
+
+            if self.use_remove_padding:
+                input_ids_rmpad, indices, *_ = unpad_input(input_ids.unsqueeze(-1), attention_mask)
+                input_ids_rmpad = input_ids_rmpad.transpose(0, 1)  # (1, total_nnz)
+
+                # unpad the position_ids
+                if position_ids.dim() == 3:
+                    position_ids_rmpad = index_first_axis(rearrange(position_ids, "c b s ... -> (b s) c ..."), indices).transpose(0, 1).unsqueeze(1)
+                else:
+                    position_ids_rmpad = index_first_axis(rearrange(position_ids.unsqueeze(-1), "b s ... -> (b s) ..."), indices).transpose(0, 1)
+
+                input_ids_rmpad_rolled = torch.roll(input_ids_rmpad, shifts=-1, dims=1)
+
+                # pad and slice if using ulysses sp
+                if self.use_ulysses_sp:
+                    is_vlm_model = "multi_modal_inputs" in micro_batch
+                    if is_vlm_model:
+                        input_ids_rmpad, position_ids_rmpad, pad_size = ulysses_pad(
+                            input_ids_rmpad,
+                            position_ids_rmpad=position_ids_rmpad,
+                            sp_size=self.ulysses_sequence_parallel_size,
+                        )
+                    else:
+                        input_ids_rmpad, position_ids_rmpad, pad_size = ulysses_pad_and_slice_inputs(
+                            input_ids_rmpad,
+                            position_ids_rmpad=position_ids_rmpad,
+                            sp_size=self.ulysses_sequence_parallel_size,
+                        )
+                    input_ids_rmpad_rolled, _, _ = ulysses_pad_and_slice_inputs(
+                        input_ids_rmpad_rolled,
+                        position_ids_rmpad=None,
+                        sp_size=self.ulysses_sequence_parallel_size,
+                    )
+
+                input_ids_rmpad_rolled = input_ids_rmpad_rolled.squeeze(0)
+
+                # Forward pass with rmpad
+                output = self.actor_module(
+                    input_ids=input_ids_rmpad,
+                    attention_mask=None,
+                    position_ids=position_ids_rmpad,
+                    **multi_modal_inputs,
+                    use_cache=False,
+                )
+
+                logits_rmpad = output.logits.squeeze(0)  # (total_nnz, vocab_size)
+                logits_rmpad = logits_rmpad / temperature
+
+                # Compute log probs for selected tokens
+                log_probs = logprobs_from_logits(
+                    logits=logits_rmpad,
+                    labels=input_ids_rmpad_rolled,
+                    inplace_backward=False,  # Can't use inplace since we need logits for top-k
+                )
+
+                # Compute top-k indices and log probs from rmpad logits
+                topk_indices_rmpad, topk_log_probs_rmpad = topk_logprobs_from_logits(logits_rmpad, k=topk_k)
+                # topk_indices_rmpad: (total_nnz, k)
+                # topk_log_probs_rmpad: (total_nnz, k)
+
+                # Gather if using ulysses sp
+                if self.use_ulysses_sp:
+                    log_probs = gather_outpus_and_unpad(log_probs, gather_dim=0, unpad_dim=0, padding_size=pad_size)
+                    # Gather top-k results
+                    topk_indices_rmpad = gather_outpus_and_unpad(topk_indices_rmpad, gather_dim=0, unpad_dim=0, padding_size=pad_size)
+                    topk_log_probs_rmpad = gather_outpus_and_unpad(topk_log_probs_rmpad, gather_dim=0, unpad_dim=0, padding_size=pad_size)
+
+                # Pad back to (bsz, seqlen)
+                full_log_probs = pad_input(
+                    hidden_states=log_probs.unsqueeze(-1),
+                    indices=indices,
+                    batch=batch_size,
+                    seqlen=seqlen,
+                )
+
+                # Pad back top-k results: need to handle (total_nnz, k) -> (bsz, seqlen, k)
+                full_topk_indices = pad_input(
+                    hidden_states=topk_indices_rmpad,  # (total_nnz, k)
+                    indices=indices,
+                    batch=batch_size,
+                    seqlen=seqlen,
+                )  # (bsz, seqlen, k)
+
+                full_topk_log_probs = pad_input(
+                    hidden_states=topk_log_probs_rmpad,  # (total_nnz, k)
+                    indices=indices,
+                    batch=batch_size,
+                    seqlen=seqlen,
+                )  # (bsz, seqlen, k)
+
+                # Extract response part
+                log_probs = full_log_probs.squeeze(-1)[:, -response_length - 1 : -1]  # (bsz, response_length)
+                topk_indices = full_topk_indices[:, -response_length - 1 : -1, :]  # (bsz, response_length, k)
+                topk_log_probs = full_topk_log_probs[:, -response_length - 1 : -1, :]  # (bsz, response_length, k)
+
+            else:  # not using rmpad
+                output = self.actor_module(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    **multi_modal_inputs,
+                    use_cache=False,
+                )
+
+                logits = output.logits
+                logits = logits / temperature
+                response_logits = logits[:, -response_length - 1 : -1, :]  # (bsz, response_length, vocab_size)
+
+                # Compute log probs and top-k
+                log_probs = logprobs_from_logits(response_logits, micro_batch["responses"])
+                topk_indices, topk_log_probs = topk_logprobs_from_logits(response_logits, k=topk_k)
+
+            return log_probs, topk_indices, topk_log_probs
+
+    @GPUMemoryLogger(role="dp actor", logger=logger)
+    def compute_log_prob_for_topk_indices(self, data: DataProto, topk_indices: torch.Tensor) -> torch.Tensor:
+        """Compute log probabilities for given top-k token indices.
+        
+        Used to compute student model's log probs for teacher's top-k tokens.
+        
+        Args:
+            data: DataProto containing input_ids, attention_mask, position_ids, responses
+            topk_indices: (batch_size, response_length, k) - indices to compute log probs for
+            
+        Returns:
+            topk_log_probs: (batch_size, response_length, k) - log probs for given indices
+        """
+        from verl.utils.torch_functional import logprobs_from_logits_for_indices
+        
+        self.actor_module.eval()
+        
+        micro_batch_size = data.meta_info["micro_batch_size"]
+        temperature = data.meta_info["temperature"]
+        use_dynamic_bsz = data.meta_info["use_dynamic_bsz"]
+        
+        select_keys = ["responses", "input_ids", "attention_mask", "position_ids"]
+        batch = data.select(batch_keys=select_keys).batch
+        has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
+        
+        batch_size = data.batch.batch_size[0]
+        
+        if has_multi_modal_inputs:
+            num_micro_batches = batch_size // micro_batch_size
+            non_tensor_select_keys = ["multi_modal_inputs"]
+            micro_batches = data.select(select_keys, non_tensor_select_keys).chunk(num_micro_batches)
+            topk_indices_chunks = topk_indices.chunk(num_micro_batches, dim=0)
+        elif use_dynamic_bsz:
+            max_token_len = data.meta_info["max_token_len"] * self.ulysses_sequence_parallel_size
+            micro_batches, indices = rearrange_micro_batches(batch=batch, max_token_len=max_token_len)
+            # Reorder topk_indices to match rearranged batches
+            flat_indices = list(itertools.chain.from_iterable(indices))
+            topk_indices_reordered = topk_indices[flat_indices]
+            topk_indices_chunks = []
+            start = 0
+            for mb in micro_batches:
+                mb_size = mb.batch_size[0] if hasattr(mb, 'batch_size') else len(mb['input_ids'])
+                topk_indices_chunks.append(topk_indices_reordered[start:start + mb_size])
+                start += mb_size
+        else:
+            micro_batches = batch.split(micro_batch_size)
+            topk_indices_chunks = topk_indices.split(micro_batch_size, dim=0)
+        
+        topk_log_probs_lst = []
+        
+        for micro_batch, topk_idx_chunk in zip(micro_batches, topk_indices_chunks):
+            if isinstance(micro_batch, DataProto):
+                micro_batch = {**micro_batch.batch, **micro_batch.non_tensor_batch}
+            with torch.no_grad():
+                topk_log_probs = self._forward_micro_batch_for_indices(
+                    micro_batch, topk_idx_chunk, temperature=temperature
+                )
+            topk_log_probs_lst.append(topk_log_probs)
+        
+        topk_log_probs = torch.concat(topk_log_probs_lst, dim=0)
+        
+        if use_dynamic_bsz:
+            revert_indices = torch.tensor(get_reverse_idx(flat_indices), dtype=torch.long)
+            topk_log_probs = topk_log_probs[revert_indices]
+        
+        return topk_log_probs
+
+    def _forward_micro_batch_for_indices(self, micro_batch, topk_indices, temperature):
+        """Forward pass that computes log probs for specific token indices.
+        
+        Follows rmpad pattern for memory efficiency.
+        topk_indices: (bsz, response_length, k)
+        """
+        from verl.utils.torch_functional import logprobs_from_logits_for_indices
+        
+        response_length = micro_batch["responses"].size(-1)
+        multi_modal_inputs = {}
+        if "multi_modal_inputs" in micro_batch:
+            for key in micro_batch["multi_modal_inputs"][0].keys():
+                multi_modal_inputs[key] = torch.cat([inputs[key] for inputs in micro_batch["multi_modal_inputs"]], dim=0)
+
+        with torch.autocast(device_type=self.device_name, dtype=torch.bfloat16):
+            input_ids = micro_batch["input_ids"]
+            batch_size, seqlen = input_ids.shape
+            attention_mask = micro_batch["attention_mask"]
+            position_ids = micro_batch["position_ids"]
+            
+            if position_ids.dim() == 3:  # qwen2vl mrope
+                position_ids = position_ids.transpose(0, 1)
+
+            if self.use_remove_padding:
+                input_ids_rmpad, indices, *_ = unpad_input(input_ids.unsqueeze(-1), attention_mask)
+                input_ids_rmpad = input_ids_rmpad.transpose(0, 1)
+
+                # unpad position_ids
+                if position_ids.dim() == 3:
+                    position_ids_rmpad = index_first_axis(rearrange(position_ids, "c b s ... -> (b s) c ..."), indices).transpose(0, 1).unsqueeze(1)
+                else:
+                    position_ids_rmpad = index_first_axis(rearrange(position_ids.unsqueeze(-1), "b s ... -> (b s) ..."), indices).transpose(0, 1)
+
+                # Unpad topk_indices: (bsz, seqlen, k) -> (total_nnz, k)
+                # First flatten to (bsz*seqlen, k), then index
+                topk_indices_flat = rearrange(topk_indices, "b s k -> (b s) k")
+                topk_indices_rmpad = index_first_axis(topk_indices_flat, indices)  # (total_nnz, k)
+
+                # pad and slice if using ulysses sp
+                if self.use_ulysses_sp:
+                    is_vlm_model = "multi_modal_inputs" in micro_batch
+                    if is_vlm_model:
+                        input_ids_rmpad, position_ids_rmpad, pad_size = ulysses_pad(
+                            input_ids_rmpad,
+                            position_ids_rmpad=position_ids_rmpad,
+                            sp_size=self.ulysses_sequence_parallel_size,
+                        )
+                    else:
+                        input_ids_rmpad, position_ids_rmpad, pad_size = ulysses_pad_and_slice_inputs(
+                            input_ids_rmpad,
+                            position_ids_rmpad=position_ids_rmpad,
+                            sp_size=self.ulysses_sequence_parallel_size,
+                        )
+                    # Pad and slice topk_indices as well
+                    topk_indices_rmpad, _, _ = ulysses_pad_and_slice_inputs(
+                        topk_indices_rmpad.unsqueeze(0),  # Add batch dim for padding
+                        position_ids_rmpad=None,
+                        sp_size=self.ulysses_sequence_parallel_size,
+                    )
+                    topk_indices_rmpad = topk_indices_rmpad.squeeze(0)  # Remove batch dim
+
+                # Forward pass
+                output = self.actor_module(
+                    input_ids=input_ids_rmpad,
+                    attention_mask=None,
+                    position_ids=position_ids_rmpad,
+                    **multi_modal_inputs,
+                    use_cache=False,
+                )
+
+                logits_rmpad = output.logits.squeeze(0)  # (total_nnz, vocab_size)
+                logits_rmpad = logits_rmpad / temperature
+
+                # Compute log probs for given indices: (total_nnz, k)
+                topk_log_probs_rmpad = logprobs_from_logits_for_indices(logits_rmpad, topk_indices_rmpad)
+
+                # Gather if using ulysses sp
+                if self.use_ulysses_sp:
+                    topk_log_probs_rmpad = gather_outpus_and_unpad(
+                        topk_log_probs_rmpad, gather_dim=0, unpad_dim=0, padding_size=pad_size
+                    )
+
+                # Pad back to (bsz, seqlen, k)
+                full_topk_log_probs = pad_input(
+                    hidden_states=topk_log_probs_rmpad,  # (total_nnz, k)
+                    indices=indices,
+                    batch=batch_size,
+                    seqlen=seqlen,
+                )  # (bsz, seqlen, k)
+
+                # Extract response part
+                topk_log_probs = full_topk_log_probs[:, -response_length - 1 : -1, :]  # (bsz, response_length, k)
+
+            else:  # not using rmpad
+                output = self.actor_module(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    **multi_modal_inputs,
+                    use_cache=False,
+                )
+
+                logits = output.logits
+                logits = logits / temperature
+                response_logits = logits[:, -response_length - 1 : -1, :]  # (bsz, response_length, vocab_size)
+
+                # Compute log probs for given indices
+                topk_log_probs = logprobs_from_logits_for_indices(response_logits, topk_indices)
+
+            return topk_log_probs
+
+    @GPUMemoryLogger(role="dp actor", logger=logger)
     def update_policy(self, data: DataProto):
         # make sure we are in training mode
         self.actor_module.train()
