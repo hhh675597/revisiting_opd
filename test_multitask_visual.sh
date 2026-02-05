@@ -13,7 +13,7 @@ export RAY_worker_register_timeout_seconds=600
 
 TIME_STAMP=$(date +"%m%d_%H%M%S")
 project_name='multitask_opd'
-exp_name='multitask-opd-naive-qwen2.5-7b-it'
+exp_name='dbg_visualization'
 
 set -x
 ENGINE=${1:-vllm}
@@ -28,7 +28,7 @@ train_data_size=16
 val_data_size=128
 group_size=8 
 
-MULTITASK_DATA_DIR="/data/home/zdhs0086/hhh/verl-agent/data/multitask_data_test"
+MULTITASK_DATA_DIR="/data/home/zdhs0086/hhh/verl-agent/data/math_opd"
 TRAIN_DATA="${MULTITASK_DATA_DIR}/train.parquet"
 VAL_DATA="${MULTITASK_DATA_DIR}/test.parquet"
 
@@ -41,7 +41,7 @@ python3 -m verl.trainer.main_ppo_multitask \
     algorithm.adv_estimator=opd \
     +algorithm.opd.gamma=0.0 \
     +algorithm.opd.reward_weight=0.0 \
-    +multitask.enable=true \
+    +multitask.enable=False \
     +multitask.batching_mode=sequential \
     +multitask.tasks.task0.name=alfworld \
     +multitask.tasks.task0.env_name=alfworld/AlfredTWEnv \
@@ -50,6 +50,7 @@ python3 -m verl.trainer.main_ppo_multitask \
     +multitask.tasks.task1.name=math \
     +multitask.tasks.task1.env_name=math \
     +multitask.tasks.task1.ref_model_path=${MATH_TEACHER} \
+    actor_rollout_ref.ref.model.path=/data/home/zdhs0086/hhh/verl-agent/models/OpenThinker3-7B \
     data.train_files=${TRAIN_DATA} \
     data.val_files=${VAL_DATA} \
     data.train_batch_size=${train_data_size} \
@@ -87,7 +88,7 @@ python3 -m verl.trainer.main_ppo_multitask \
     actor_rollout_ref.actor.use_invalid_action_penalty=False \
     actor_rollout_ref.actor.invalid_action_penalty_coef=0.0 \
     algorithm.use_kl_in_reward=True \
-    env.env_name=multitask \
+    env.env_name=math \
     env.seed=0 \
     env.max_steps=30 \
     env.rollout.n=${group_size} \

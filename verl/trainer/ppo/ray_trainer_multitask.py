@@ -1227,6 +1227,38 @@ class RayPPOTrainer:
                             else:
                                 ref_log_prob = self.actor_rollout_wg.compute_ref_log_prob(batch)
                             batch = batch.union(ref_log_prob)
+                        
+                        # Visualize teacher vs student distributions
+                        if self.config.trainer.get("visualize_distribution", False):
+                            visualize_freq = self.config.trainer.get("visualize_distribution_freq", 100)
+                            if self.global_steps % visualize_freq == 0:
+                                try:
+                                    from verl.utils.visualize_distribution import visualize_teacher_student_batch
+                                    
+                                    # Extract task_type for filename
+                                    task_type = None
+                                    if 'task_type' in batch.non_tensor_batch:
+                                        task_type = str(batch.non_tensor_batch['task_type'][0])
+                                    
+                                    output_dir = self.config.trainer.get(
+                                        "visualize_distribution_dir",
+                                        f"{self.config.trainer.default_hdfs_dir}/visualizations"
+                                    )
+                                    
+                                    visualize_teacher_student_batch(
+                                        batch=batch,
+                                        teacher_log_probs=batch.batch['ref_log_prob'],
+                                        student_log_probs=batch.batch['old_log_probs'],
+                                        tokenizer=self.tokenizer,
+                                        global_step=self.global_steps,
+                                        output_dir=output_dir,
+                                        num_samples=self.config.trainer.get("visualize_distribution_samples", 2),
+                                        task_type=task_type,
+                                    )
+                                except Exception as e:
+                                    print(f"[Warning] Failed to generate distribution visualization: {e}")
+                                    import traceback
+                                    traceback.print_exc()
 
                     # compute values
                     if self.use_critic:
