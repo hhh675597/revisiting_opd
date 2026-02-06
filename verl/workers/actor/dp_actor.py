@@ -619,9 +619,14 @@ class DataParallelPPOActor(BasePPOActor):
                 else:
                     position_ids_rmpad = index_first_axis(rearrange(position_ids.unsqueeze(-1), "b s ... -> (b s) ..."), indices).transpose(0, 1)
 
-                # Unpad topk_indices: (bsz, seqlen, k) -> (total_nnz, k)
-                # First flatten to (bsz*seqlen, k), then index
-                topk_indices_flat = rearrange(topk_indices, "b s k -> (b s) k")
+                # topk_indices is (bsz, response_length, k) but indices are for (bsz, seqlen)
+                # Expand to full seqlen first, then unpad.
+                # Place at [-response_length-1:-1] because these are the logit positions
+                # that PREDICT the response tokens (position t predicts token t+1).
+                full_topk_indices = torch.zeros(batch_size, seqlen, topk_indices.shape[-1],
+                                                dtype=topk_indices.dtype, device=topk_indices.device)
+                full_topk_indices[:, -response_length - 1 : -1, :] = topk_indices
+                topk_indices_flat = rearrange(full_topk_indices, "b s k -> (b s) k")
                 topk_indices_rmpad = index_first_axis(topk_indices_flat, indices)  # (total_nnz, k)
 
                 # pad and slice if using ulysses sp

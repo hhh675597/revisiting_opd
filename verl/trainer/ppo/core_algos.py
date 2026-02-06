@@ -753,7 +753,7 @@ def compute_opd_advantage(
         data,
         gamma: float = 0.0, 
         reward_weight: float = 0.0,
-        multi_turn: bool = True,
+        multi_turn: bool = False,
         use_topk_kl: bool = False,
 ):
     """Compute advantage as the difference between teacher and student log-probabilities, possibly combined with outcome reward.
