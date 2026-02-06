@@ -12,5 +12,6 @@
         "utility": "cpp"
     },
     "iis.configDir": "",
-    "git.ignoreLimitWarning": true
+    "git.ignoreLimitWarning": true,
+    "livePreview.defaultPreviewPath": "/ckpts/dbg_topk_0206_093924/visualizations/step000030_sample0_unknown.html"
 }

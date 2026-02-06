@@ -13,7 +13,7 @@ export RAY_worker_register_timeout_seconds=600
 
 TIME_STAMP=$(date +"%m%d_%H%M%S")
 project_name='multitask_opd'
-exp_name='dbg_topk'
+exp_name='dbg_topk_k50'
 
 set -x
 ENGINE=${1:-vllm}
@@ -42,7 +42,7 @@ python3 -m verl.trainer.main_ppo_multitask \
     +algorithm.opd.gamma=0.0 \
     +algorithm.opd.reward_weight=0.0 \
     +algorithm.opd.topk=True \
-    +algorithm.opd.k=20 \
+    +algorithm.opd.k=50 \
     +multitask.enable=False \
     +multitask.batching_mode=sequential \
     +multitask.tasks.task0.name=alfworld \
