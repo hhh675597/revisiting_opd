@@ -258,7 +258,7 @@ def create_html_visualization(
             background-color: #ecf0f1 !important;
         }}
         .tooltip {{
-            position: fixed;
+            position: absolute; /* Changed from fixed to absolute */
             background-color: rgba(0, 0, 0, 0.9);
             color: white;
             padding: 12px;

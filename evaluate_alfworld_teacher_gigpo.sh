@@ -31,9 +31,9 @@ python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=opd \
     +algorithm.opd.gamma=0.0 \
     +algorithm.opd.reward_weight=0.0 \
-    actor_rollout_ref.ref.model.path=/data/home/zdhs0086/hhh/verl-agent/models/alfworld-teacher-gigpo-qwen2.5-7b \
-    data.train_files=/data/home/zdhs0086/hhh/verl-agent/data/verl-agent/text/train.parquet \
-    data.val_files=/data/home/zdhs0086/hhh/verl-agent/data/verl-agent/text/test.parquet \
+    actor_rollout_ref.ref.model.path=/data/home/zdhs0010/agentic/model/alfworld-teacher-gigpo-qwen2.5-7b \
+    data.train_files=/data/home/zdhs0010/agentic/verl-agent-multi/data/verl-agent/text/train.parquet \
+    data.val_files=/data/home/zdhs0010/agentic/verl-agent-multi/data/verl-agent/text/test.parquet \
     data.train_batch_size=$train_data_size \
     data.val_batch_size=$val_data_size \
     data.max_prompt_length=2048 \
@@ -41,7 +41,7 @@ python3 -m verl.trainer.main_ppo \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
     data.return_raw_chat=True \
-    actor_rollout_ref.model.path=/data/home/zdhs0086/hhh/verl-agent/models/alfworld-teacher-gigpo-qwen2.5-7b \
+    actor_rollout_ref.model.path=/data/home/zdhs0010/agentic/model/alfworld-teacher-gigpo-qwen2.5-7b \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.actor.ppo_mini_batch_size=256 \
@@ -86,6 +86,6 @@ python3 -m verl.trainer.main_ppo \
     trainer.default_local_dir="${CKPTS_DIR}" \
     trainer.resume_mode=auto \
     ray_init.num_cpus=96 \
-    2>&1 | tee /data/home/zdhs0086/hhh/verl-agent/data/logs/alfworld/${exp_name}_${TIME_STAMP}.log
+    2>&1 | tee /data/home/zdhs0010/agentic/verl-agent-multi/data/logs/alfworld/${exp_name}_${TIME_STAMP}.log
 
 # consider changing tp_size

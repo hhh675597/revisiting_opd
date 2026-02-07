@@ -13,7 +13,7 @@ export RAY_worker_register_timeout_seconds=600
 
 TIME_STAMP=$(date +"%m%d_%H%M%S")
 project_name='multitask_opd'
-exp_name='dbg_topk_k50'
+exp_name='dbg_topk_k50_lr3e-6'
 
 set -x
 ENGINE=${1:-vllm}
@@ -28,13 +28,13 @@ train_data_size=16
 val_data_size=128
 group_size=8 
 
-MULTITASK_DATA_DIR="/data/home/zdhs0086/hhh/verl-agent/data/math_opd"
+MULTITASK_DATA_DIR="/data/home/zdhs0010/agentic/verl-agent-multi/data/math_opd"
 TRAIN_DATA="${MULTITASK_DATA_DIR}/train.parquet"
 VAL_DATA="${MULTITASK_DATA_DIR}/test.parquet"
 
-STUDENT_MODEL="/data/home/zdhs0086/hhh/verl-agent/models/Qwen2.5-7B-Instruct"
-ALFWORLD_TEACHER="/data/home/zdhs0086/hhh/verl-agent/models/alfworld-teacher-gigpo-qwen2.5-7b"
-MATH_TEACHER="/data/home/zdhs0086/hhh/verl-agent/models/OpenThinker3-7B"
+STUDENT_MODEL="/data/home/zdhs0010/agentic/model/qwen-2.5-7b-it"
+ALFWORLD_TEACHER="/data/home/zdhs0010/agentic/model/alfworld-teacher-gigpo-qwen2.5-7b"
+MATH_TEACHER="/data/home/zdhs0010/agentic/model/OpenThinker3-7B"
 
 
 python3 -m verl.trainer.main_ppo_multitask \
@@ -52,7 +52,7 @@ python3 -m verl.trainer.main_ppo_multitask \
     +multitask.tasks.task1.name=math \
     +multitask.tasks.task1.env_name=math \
     +multitask.tasks.task1.ref_model_path=${MATH_TEACHER} \
-    actor_rollout_ref.ref.model.path=/data/home/zdhs0086/hhh/verl-agent/models/OpenThinker3-7B \
+    actor_rollout_ref.ref.model.path=${MATH_TEACHER} \
     data.train_files=${TRAIN_DATA} \
     data.val_files=${VAL_DATA} \
     data.train_batch_size=${train_data_size} \
@@ -64,7 +64,7 @@ python3 -m verl.trainer.main_ppo_multitask \
     data.return_raw_chat=True \
     +data.batching_mode=sequential \
     actor_rollout_ref.model.path=${STUDENT_MODEL} \
-    actor_rollout_ref.actor.optim.lr=1e-6 \
+    actor_rollout_ref.actor.optim.lr=3e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.actor.ppo_mini_batch_size=64 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
@@ -75,7 +75,7 @@ python3 -m verl.trainer.main_ppo_multitask \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
-    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=8 \
+    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=4 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.name=${ENGINE} \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.7 \
@@ -85,7 +85,7 @@ python3 -m verl.trainer.main_ppo_multitask \
     actor_rollout_ref.rollout.free_cache_engine=False \
     actor_rollout_ref.rollout.val_kwargs.temperature=0.4 \
     actor_rollout_ref.rollout.val_kwargs.do_sample=True \
-    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=8 \
+    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=4 \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.use_invalid_action_penalty=False \
     actor_rollout_ref.actor.invalid_action_penalty_coef=0.0 \
@@ -113,5 +113,5 @@ python3 -m verl.trainer.main_ppo_multitask \
     +trainer.visualize_distribution_samples=1 \
     +trainer.visualize_distribution_dir="${CKPTS_DIR}/visualizations" \
     ray_init.num_cpus=96 \
-    2>&1 | tee /data/home/zdhs0086/hhh/verl-agent/data/logs/multitask_dbg/${exp_name}_${TIME_STAMP}.log
+    2>&1 | tee /data/home/zdhs0010/agentic/verl-agent-multi/data/logs/multitask/${exp_name}_${TIME_STAMP}.log
 
