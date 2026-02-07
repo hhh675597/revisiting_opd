@@ -1,0 +1,15 @@
+task=math, ignore_token_id=151645, num_<|im_end|>=64, response_mask_ones=62126, kl_mask_ones=62062
+task=math, ignore_token_id=151645, num_<|im_end|>=64, response_mask_ones=67376, kl_mask_ones=67312
+task=math, ignore_token_id=151645, num_<|im_end|>=64, response_mask_ones=68514, kl_mask_ones=68450
+task=math, ignore_token_id=151645, num_<|im_end|>=64, response_mask_ones=74646, kl_mask_ones=74582
+task=math, ignore_token_id=151645, num_<|im_end|>=64, response_mask_ones=63952, kl_mask_ones=63888
+task=math, ignore_token_id=151645, num_<|im_end|>=64, response_mask_ones=88996, kl_mask_ones=88932
+task=math, ignore_token_id=151645, num_<|im_end|>=64, response_mask_ones=74822, kl_mask_ones=74758
+task=math, ignore_token_id=151645, num_<|im_end|>=64, response_mask_ones=80044, kl_mask_ones=79980
+task=math, ignore_token_id=151645, num_<|im_end|>=60, response_mask_ones=201748, kl_mask_ones=201688
+task=math, ignore_token_id=151645, num_<|im_end|>=64, response_mask_ones=102416, kl_mask_ones=102352
+task=math, ignore_token_id=151645, num_<|im_end|>=64, response_mask_ones=139654, kl_mask_ones=139590
+task=math, ignore_token_id=151645, num_<|im_end|>=64, response_mask_ones=206280, kl_mask_ones=206216
+task=math, ignore_token_id=151645, num_<|im_end|>=64, response_mask_ones=182842, kl_mask_ones=182778
+task=math, ignore_token_id=151645, num_<|im_end|>=60, response_mask_ones=260352, kl_mask_ones=260292
+task=math, ignore_token_id=151645, num_<|im_end|>=60, response_mask_ones=302560, kl_mask_ones=302500
