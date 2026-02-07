@@ -838,7 +838,6 @@ def compute_opd_advantage(
         # num_im_end = (responses == ignore_token_id).sum().item()
         # response_mask_ones = int(response_mask.sum().item())
         # kl_mask_ones = int(kl_mask.sum().item())
-
         # with open("debug_log.txt", "a") as f:
         #     f.write(
         #         f"task={task_name}, "

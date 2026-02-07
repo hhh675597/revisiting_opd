@@ -1318,7 +1318,7 @@ class RayPPOTrainer:
                                 adv_estimator=self.config.algorithm.adv_estimator,
                                 gamma=self.config.algorithm.opd.get("gamma", 0.0),
                                 reward_weight=self.config.algorithm.opd.get("reward_weight", 0.0), # maybe add more args later
-                                tokenizer = self.tokenizer, # 用于得到mask_token对应的ids
+                                tokenizer = self.tokenizer, # 用于得到mask_token对应ids
                             )
 
                     # update critic

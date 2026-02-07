@@ -11,7 +11,6 @@ unset PYTHONPATH
 
 # 设置正确的 Python 路径
 export PYTHONPATH="/data/home/zdhs0086/jkevin/verl-agent-multi-main:$PYTHONPATH"
-
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export WANDB_MODE=offline
 export RAY_worker_register_timeout_seconds=600
@@ -25,7 +24,6 @@ ENGINE=${1:-vllm}
 export VLLM_ATTENTION_BACKEND=XFORMERS
 
 CKPTS_DIR=${CKPTS_DIR:-"$/data/home/zdhs0086/jkevin/verl-agent-multi-main/ckpts/${exp_name}_${TIME_STAMP}"}
-
 num_cpus_per_env_worker=0.1
 
 
