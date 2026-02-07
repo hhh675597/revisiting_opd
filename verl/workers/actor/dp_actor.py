@@ -29,7 +29,10 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
 import verl.utils.torch_functional as verl_F
 from verl import DataProto
-from verl.trainer.ppo.core_algos import agg_loss, compute_policy_loss, compute_policy_loss_gspo, kl_penalty
+from verl.trainer.ppo.core_algos import (
+    agg_loss, compute_policy_loss, compute_policy_loss_gspo, kl_penalty,
+    compute_memory_efficient_kl,
+)
 from verl.utils.debug import GPUMemoryLogger
 from verl.utils.device import get_device_name, get_torch_device, is_cuda_available, is_npu_available
 from verl.utils.fsdp_utils import FSDPModule, fsdp2_clip_grad_norm_
@@ -312,6 +315,377 @@ class DataParallelPPOActor(BasePPOActor):
             log_probs = log_probs[revert_indices]
 
         return log_probs, entropys
+
+    # =========================================================================
+    # EMA-PG STYLE: LOGITS-BASED KL METHODS
+    # =========================================================================
+
+    def _forward_micro_batch_with_logits(
+        self, micro_batch, temperature,
+        kl_topk_k: int = None, kl_topk_indices: torch.Tensor = None,
+    ) -> tuple:
+        """
+        copied from https://github.com/LunjunZhang/ema-pg
+        Forward pass that also returns logits for KL divergence computation.
+
+        Args:
+            micro_batch: Input batch dict.
+            temperature: Temperature for logits.
+            kl_topk_k: -1 for full logits, >0 to compute top-k from own logits.
+                       None means use kl_topk_indices instead.
+            kl_topk_indices: Indices to gather at (only used when kl_topk_k is None).
+
+        Returns:
+            entropy: (bs, response_len)
+            log_probs: (bs, response_len)
+            kl_inputs: dict containing:
+                - logits_k: (bs, response_len, vocab_size) if kl_topk_k=-1, else (bs, response_len, k)
+                - topk_indices: (bs, response_len, k) or None if kl_topk_k=-1
+                - logsumexp: (bs, response_len) - for proper normalization
+        """
+        if kl_topk_k is None and kl_topk_indices is None:
+            raise ValueError("Must provide either kl_topk_k or kl_topk_indices")
+        if kl_topk_k is not None and kl_topk_indices is not None:
+            raise ValueError("kl_topk_k and kl_topk_indices are mutually exclusive")
+
+        response_length = micro_batch['responses'].size(-1)
+        with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+            input_ids = micro_batch['input_ids']
+            batch_size, seqlen = input_ids.shape
+            attention_mask = micro_batch['attention_mask']
+            position_ids = micro_batch['position_ids']
+
+            if self.use_remove_padding:
+                input_ids_rmpad, indices, *_ = unpad_input(input_ids.unsqueeze(-1), attention_mask)
+                input_ids_rmpad = input_ids_rmpad.transpose(0, 1)
+                position_ids_rmpad = index_first_axis(
+                    rearrange(position_ids.unsqueeze(-1), "b s ... -> (b s) ..."), indices
+                ).transpose(0, 1)
+                input_ids_rmpad_rolled = torch.roll(input_ids_rmpad, shifts=-1, dims=1)
+
+                if self.use_ulysses_sp:
+                    input_ids_rmpad, position_ids_rmpad, pad_size = ulysses_pad_and_slice_inputs(
+                        input_ids_rmpad, position_ids_rmpad, sp_size=self.ulysses_sequence_parallel_size
+                    )
+                    input_ids_rmpad_rolled, _, _ = ulysses_pad_and_slice_inputs(
+                        input_ids_rmpad_rolled, None, self.ulysses_sequence_parallel_size
+                    )
+
+                input_ids_rmpad_rolled = input_ids_rmpad_rolled.squeeze(0)
+
+                output = self.actor_module(
+                    input_ids=input_ids_rmpad,
+                    attention_mask=None,
+                    position_ids=position_ids_rmpad,
+                    use_cache=False,
+                )
+                logits_rmpad = output.logits.squeeze(0)
+                logits_rmpad.div_(temperature)
+
+                # Compute entropy
+                entropy_rmpad = self.compute_entropy_from_logits(logits_rmpad)
+
+                # Compute log probs
+                log_probs = logprobs_from_logits(logits=logits_rmpad, labels=input_ids_rmpad_rolled)
+
+                # Derive logsumexp from log_probs: logsumexp = logits[label] - log_softmax(logits)[label]
+                logits_at_label_rmpad = logits_rmpad.gather(-1, input_ids_rmpad_rolled.unsqueeze(-1)).squeeze(-1)
+                logsumexp_rmpad = logits_at_label_rmpad - log_probs
+
+                # Handle top-k or full logits
+                if kl_topk_k == -1:
+                    logits_k_rmpad = logits_rmpad
+                    topk_indices_rmpad = None
+                elif kl_topk_k is not None and kl_topk_k > 0:
+                    _, topk_indices_rmpad = logits_rmpad.topk(kl_topk_k, dim=-1)
+                    logits_k_rmpad = logits_rmpad.gather(-1, topk_indices_rmpad)
+                else:
+                    # kl_topk_k is None, use kl_topk_indices - gather later
+                    logits_k_rmpad = None
+                    topk_indices_rmpad = None
+
+                # Gather if sp > 1
+                if self.use_ulysses_sp:
+                    log_probs = gather_outpus_and_unpad(log_probs, gather_dim=0, unpad_dim=0, padding_size=pad_size)
+                    entropy_rmpad = gather_outpus_and_unpad(entropy_rmpad, gather_dim=0, unpad_dim=0, padding_size=pad_size)
+                    if logits_k_rmpad is not None:
+                        logits_k_rmpad = gather_outpus_and_unpad(logits_k_rmpad, gather_dim=0, unpad_dim=0, padding_size=pad_size)
+                    else:
+                        logits_rmpad = gather_outpus_and_unpad(logits_rmpad, gather_dim=0, unpad_dim=0, padding_size=pad_size)
+                    logsumexp_rmpad = gather_outpus_and_unpad(logsumexp_rmpad, gather_dim=0, unpad_dim=0, padding_size=pad_size)
+                    if topk_indices_rmpad is not None:
+                        topk_indices_rmpad = gather_outpus_and_unpad(topk_indices_rmpad, gather_dim=0, unpad_dim=0, padding_size=pad_size)
+
+                # Handle kl_topk_indices case: gather directly at response positions
+                if kl_topk_k is None and kl_topk_indices is not None:
+                    # Validate kl_topk_indices shape
+                    assert kl_topk_indices.shape[0] == batch_size, \
+                        f"kl_topk_indices batch size {kl_topk_indices.shape[0]} != expected {batch_size}"
+                    assert kl_topk_indices.shape[1] == response_length, \
+                        f"kl_topk_indices response_length {kl_topk_indices.shape[1]} != expected {response_length}"
+
+                    total_nnz = logsumexp_rmpad.shape[0]
+                    inverse_indices = torch.full((batch_size * seqlen,), -1, dtype=torch.long, device=logsumexp_rmpad.device)
+                    inverse_indices[indices] = torch.arange(total_nnz, device=logsumexp_rmpad.device)
+
+                    response_start = seqlen - response_length - 1
+                    batch_offsets = torch.arange(batch_size, device=logsumexp_rmpad.device) * seqlen
+                    response_offsets = torch.arange(response_length, device=logsumexp_rmpad.device)
+                    flattened_response_pos = batch_offsets.unsqueeze(1) + response_start + response_offsets.unsqueeze(0)
+                    rmpad_response_pos = inverse_indices[flattened_response_pos]
+                    valid_mask = rmpad_response_pos >= 0
+                    safe_rmpad_pos = rmpad_response_pos.clamp(min=0)
+
+                    k = kl_topk_indices.shape[-1]
+                    rmpad_pos_expanded = safe_rmpad_pos.unsqueeze(-1).expand(-1, -1, k)
+                    logits_k = logits_rmpad[rmpad_pos_expanded.reshape(-1), kl_topk_indices.reshape(-1)]
+                    logits_k = logits_k.reshape(batch_size, response_length, k)
+                    logsumexp = logsumexp_rmpad[safe_rmpad_pos]
+                    logits_k = logits_k * valid_mask.unsqueeze(-1)
+                    logsumexp = logsumexp * valid_mask
+
+                    kl_inputs = {"logits_k": logits_k, "topk_indices": kl_topk_indices, "logsumexp": logsumexp}
+                    full_entropy = pad_input(hidden_states=entropy_rmpad.unsqueeze(-1), indices=indices, batch=batch_size, seqlen=seqlen)
+                    entropy = full_entropy.squeeze(-1)[:, -response_length - 1:-1]
+                    full_log_probs = pad_input(hidden_states=log_probs.unsqueeze(-1), indices=indices, batch=batch_size, seqlen=seqlen)
+                    log_probs = full_log_probs.squeeze(-1)[:, -response_length - 1:-1]
+                else:
+                    # Standard path: pad back to (bsz, seqlen), then slice
+                    full_entropy = pad_input(hidden_states=entropy_rmpad.unsqueeze(-1), indices=indices, batch=batch_size, seqlen=seqlen)
+                    full_log_probs = pad_input(hidden_states=log_probs.unsqueeze(-1), indices=indices, batch=batch_size, seqlen=seqlen)
+                    full_logits_k = pad_input(hidden_states=logits_k_rmpad, indices=indices, batch=batch_size, seqlen=seqlen)
+                    full_logsumexp = pad_input(hidden_states=logsumexp_rmpad.unsqueeze(-1), indices=indices, batch=batch_size, seqlen=seqlen)
+                    if topk_indices_rmpad is not None:
+                        full_topk_indices = pad_input(hidden_states=topk_indices_rmpad, indices=indices, batch=batch_size, seqlen=seqlen)
+
+                    entropy = full_entropy.squeeze(-1)[:, -response_length - 1:-1]
+                    log_probs = full_log_probs.squeeze(-1)[:, -response_length - 1:-1]
+                    logits_k = full_logits_k[:, -response_length - 1:-1, :]
+                    logsumexp = full_logsumexp.squeeze(-1)[:, -response_length - 1:-1]
+
+                    if kl_topk_k == -1:
+                        kl_inputs = {"logits_k": logits_k, "topk_indices": None, "logsumexp": logsumexp}
+                    else:
+                        topk_indices = full_topk_indices[:, -response_length - 1:-1, :]
+                        kl_inputs = {"logits_k": logits_k, "topk_indices": topk_indices, "logsumexp": logsumexp}
+
+                # Shape assertions for rmpad branch
+                batch_size_out = log_probs.shape[0]
+                seq_len_out = log_probs.shape[1]
+                assert kl_inputs["logsumexp"].shape == (batch_size_out, seq_len_out), \
+                    f"logsumexp shape {kl_inputs['logsumexp'].shape} != expected ({batch_size_out}, {seq_len_out})"
+                assert kl_inputs["logits_k"].shape[0] == batch_size_out and kl_inputs["logits_k"].shape[1] == seq_len_out, \
+                    f"logits_k shape {kl_inputs['logits_k'].shape} batch/seq mismatch with log_probs {log_probs.shape}"
+                if kl_inputs["topk_indices"] is not None:
+                    assert kl_inputs["topk_indices"].shape == kl_inputs["logits_k"].shape, \
+                        f"topk_indices shape {kl_inputs['topk_indices'].shape} != logits_k shape {kl_inputs['logits_k'].shape}"
+
+            else:  # not using rmpad and no ulysses sp
+                output = self.actor_module(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    use_cache=False,
+                )
+                logits = output.logits
+                logits.div_(temperature)
+                logits = logits[:, -response_length - 1:-1]
+                log_probs = logprobs_from_logits(logits, micro_batch['responses'])
+                entropy = verl_F.entropy_from_logits(logits)
+
+                # Derive logsumexp from log_probs
+                logits_at_label = logits.gather(-1, micro_batch['responses'].unsqueeze(-1)).squeeze(-1)
+                logsumexp = logits_at_label - log_probs
+
+                if kl_topk_k == -1:
+                    kl_inputs = {"logits_k": logits, "topk_indices": None, "logsumexp": logsumexp}
+                elif kl_topk_k is not None and kl_topk_k > 0:
+                    _, topk_indices = logits.topk(kl_topk_k, dim=-1)
+                    logits_k = logits.gather(-1, topk_indices)
+                    kl_inputs = {"logits_k": logits_k, "topk_indices": topk_indices, "logsumexp": logsumexp}
+                else:
+                    # kl_topk_k is None, gather at provided kl_topk_indices
+                    assert kl_topk_indices is not None
+                    # Validate kl_topk_indices shape
+                    assert kl_topk_indices.shape[0] == batch_size, \
+                        f"kl_topk_indices batch size {kl_topk_indices.shape[0]} != expected {batch_size}"
+                    assert kl_topk_indices.shape[1] == response_length, \
+                        f"kl_topk_indices response_length {kl_topk_indices.shape[1]} != expected {response_length}"
+                    logits_k = logits.gather(-1, kl_topk_indices)
+                    kl_inputs = {"logits_k": logits_k, "topk_indices": kl_topk_indices, "logsumexp": logsumexp}
+
+                # Shape assertions for non-rmpad branch
+                batch_size_out = log_probs.shape[0]
+                seq_len_out = log_probs.shape[1]
+                assert kl_inputs["logsumexp"].shape == (batch_size_out, seq_len_out), \
+                    f"logsumexp shape {kl_inputs['logsumexp'].shape} != expected ({batch_size_out}, {seq_len_out})"
+                assert kl_inputs["logits_k"].shape[0] == batch_size_out and kl_inputs["logits_k"].shape[1] == seq_len_out, \
+                    f"logits_k shape {kl_inputs['logits_k'].shape} batch/seq mismatch with log_probs {log_probs.shape}"
+                if kl_inputs["topk_indices"] is not None:
+                    assert kl_inputs["topk_indices"].shape == kl_inputs["logits_k"].shape, \
+                        f"topk_indices shape {kl_inputs['topk_indices'].shape} != logits_k shape {kl_inputs['logits_k'].shape}"
+
+            return entropy, log_probs, kl_inputs
+
+    @GPUMemoryLogger(role="dp actor", logger=logger)
+    def compute_log_prob_with_logits(self, data: DataProto, kl_topk_k: int) -> tuple:
+        """Compute log probability and extract logits for KL divergence computation.
+
+        Used for the initial forward pass (e.g., on the reference model) to get
+        top-k indices, logits_k, and logsumexp.
+
+        Args:
+            data (DataProto): Input data containing input_ids, attention_mask, etc.
+            kl_topk_k: -1 for full vocab logits, >0 for top-k logits.
+
+        Returns:
+            log_probs: tensor of shape [batch_size, response_length]
+            entropys: tensor of shape [batch_size, response_length]
+            kl_inputs: dict containing:
+                - logits_k: tensor [batch_size, response_length, vocab_size or k]
+                - topk_indices: tensor [batch_size, response_length, k] or None
+                - logsumexp: tensor [batch_size, response_length]
+        """
+        assert kl_topk_k == -1 or kl_topk_k > 0, \
+            f"kl_topk_k must be -1 (full logits) or >0 (top-k), got {kl_topk_k}"
+        self.actor_module.eval()
+
+        micro_batch_size = data.meta_info["micro_batch_size"]
+        temperature = data.meta_info["temperature"]
+        use_dynamic_bsz = data.meta_info["use_dynamic_bsz"]
+
+        select_keys = ["responses", "input_ids", "attention_mask", "position_ids"]
+        batch = data.select(batch_keys=select_keys).batch
+        has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
+
+        if has_multi_modal_inputs:
+            num_micro_batches = data.batch.batch_size[0] // micro_batch_size
+            non_tensor_select_keys = ["multi_modal_inputs"]
+            micro_batches = data.select(select_keys, non_tensor_select_keys).chunk(num_micro_batches)
+        elif use_dynamic_bsz:
+            max_token_len = data.meta_info["max_token_len"] * self.ulysses_sequence_parallel_size
+            micro_batches, indices = rearrange_micro_batches(batch=batch, max_token_len=max_token_len)
+        else:
+            micro_batches = batch.split(micro_batch_size)
+
+        log_probs_lst = []
+        entropy_list = []
+        kl_inputs_lst = []
+        for micro_batch in micro_batches:
+            if isinstance(micro_batch, DataProto):
+                micro_batch = {**micro_batch.batch, **micro_batch.non_tensor_batch}
+            with torch.no_grad():
+                entropy, log_probs, kl_inputs = self._forward_micro_batch_with_logits(
+                    micro_batch, temperature=temperature, kl_topk_k=kl_topk_k
+                )
+            log_probs_lst.append(log_probs)
+            entropy_list.append(entropy)
+            kl_inputs_lst.append(kl_inputs)
+
+        log_probs = torch.concat(log_probs_lst, dim=0)
+        entropys = torch.concat(entropy_list, dim=0)
+        output_kl_inputs = {
+            "logits_k": torch.concat([ki["logits_k"] for ki in kl_inputs_lst], dim=0),
+            "logsumexp": torch.concat([ki["logsumexp"] for ki in kl_inputs_lst], dim=0),
+        }
+        if kl_topk_k > 0:
+            output_kl_inputs["topk_indices"] = torch.concat(
+                [ki["topk_indices"] for ki in kl_inputs_lst], dim=0
+            )
+        else:
+            output_kl_inputs["topk_indices"] = None
+
+        if use_dynamic_bsz:
+            indices = list(itertools.chain.from_iterable(indices))
+            revert_indices = torch.tensor(get_reverse_idx(indices), dtype=torch.long)
+            log_probs = log_probs[revert_indices]
+            entropys = entropys[revert_indices]
+            output_kl_inputs["logits_k"] = output_kl_inputs["logits_k"][revert_indices]
+            output_kl_inputs["logsumexp"] = output_kl_inputs["logsumexp"][revert_indices]
+            if kl_topk_k > 0:
+                output_kl_inputs["topk_indices"] = output_kl_inputs["topk_indices"][revert_indices]
+
+        return log_probs, entropys, output_kl_inputs
+
+    @GPUMemoryLogger(role="dp actor", logger=logger)
+    def compute_log_prob_at_indices(self, data: DataProto, topk_indices: torch.Tensor) -> tuple:
+        """Compute log probability and gather logits at provided top-k indices.
+
+        Used to gather the actor's (or ref's) logits at another model's top-k
+        positions. For OPD with full_reverse KL: actor gathers at ref's top-k indices.
+
+        Args:
+            data (DataProto): Input data containing input_ids, attention_mask, etc.
+            topk_indices: tensor of shape [batch_size, response_length, k].
+
+        Returns:
+            log_probs: tensor of shape [batch_size, response_length]
+            kl_inputs: dict containing:
+                - logits_k: tensor [batch_size, response_length, k]
+                - topk_indices: tensor [batch_size, response_length, k] (same as input)
+                - logsumexp: tensor [batch_size, response_length]
+        """
+        assert topk_indices.dim() == 3, \
+            f"topk_indices must be 3D [batch, seq, k], got {topk_indices.dim()}D"
+        self.actor_module.eval()
+
+        micro_batch_size = data.meta_info["micro_batch_size"]
+        temperature = data.meta_info["temperature"]
+        use_dynamic_bsz = data.meta_info["use_dynamic_bsz"]
+
+        select_keys = ["responses", "input_ids", "attention_mask", "position_ids"]
+        batch = data.select(batch_keys=select_keys).batch
+        has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
+
+        if has_multi_modal_inputs:
+            num_micro_batches = data.batch.batch_size[0] // micro_batch_size
+            non_tensor_select_keys = ["multi_modal_inputs"]
+            micro_batches = data.select(select_keys, non_tensor_select_keys).chunk(num_micro_batches)
+            topk_indices_chunks = topk_indices.chunk(num_micro_batches, dim=0)
+        elif use_dynamic_bsz:
+            max_token_len = data.meta_info["max_token_len"] * self.ulysses_sequence_parallel_size
+            micro_batches, indices = rearrange_micro_batches(batch=batch, max_token_len=max_token_len)
+            # Reorder topk_indices to match rearranged batches
+            flat_indices = list(itertools.chain.from_iterable(indices))
+            topk_indices_reordered = topk_indices[flat_indices]
+            topk_indices_chunks = []
+            start = 0
+            for mb in micro_batches:
+                mb_size = mb.batch_size[0] if hasattr(mb, "batch_size") else len(mb["input_ids"])
+                topk_indices_chunks.append(topk_indices_reordered[start:start + mb_size])
+                start += mb_size
+        else:
+            micro_batches = batch.split(micro_batch_size)
+            topk_indices_chunks = list(torch.split(topk_indices, micro_batch_size, dim=0))
+
+        log_probs_lst = []
+        kl_inputs_lst = []
+        for micro_batch, indices_split in zip(micro_batches, topk_indices_chunks):
+            if isinstance(micro_batch, DataProto):
+                micro_batch = {**micro_batch.batch, **micro_batch.non_tensor_batch}
+            with torch.no_grad():
+                _, log_probs, kl_inputs = self._forward_micro_batch_with_logits(
+                    micro_batch, temperature=temperature, kl_topk_indices=indices_split
+                )
+            log_probs_lst.append(log_probs)
+            kl_inputs_lst.append(kl_inputs)
+
+        log_probs = torch.concat(log_probs_lst, dim=0)
+        output_kl_inputs = {
+            "logits_k": torch.concat([ki["logits_k"] for ki in kl_inputs_lst], dim=0),
+            "topk_indices": torch.concat([ki["topk_indices"] for ki in kl_inputs_lst], dim=0),
+            "logsumexp": torch.concat([ki["logsumexp"] for ki in kl_inputs_lst], dim=0),
+        }
+
+        if use_dynamic_bsz:
+            flat_indices_all = list(itertools.chain.from_iterable(indices))
+            revert_indices = torch.tensor(get_reverse_idx(flat_indices_all), dtype=torch.long)
+            log_probs = log_probs[revert_indices]
+            output_kl_inputs["logits_k"] = output_kl_inputs["logits_k"][revert_indices]
+            output_kl_inputs["topk_indices"] = output_kl_inputs["topk_indices"][revert_indices]
+            output_kl_inputs["logsumexp"] = output_kl_inputs["logsumexp"][revert_indices]
+
+        return log_probs, output_kl_inputs
 
     @GPUMemoryLogger(role="dp actor", logger=logger)
     def compute_log_prob_with_topk(self, data: DataProto, topk_k: int = 50) -> dict:
@@ -714,7 +1088,17 @@ class DataParallelPPOActor(BasePPOActor):
         if multi_turn:
             select_keys.append("loss_mask")
         if self.config.use_kl_loss:
-            select_keys.append("ref_log_prob")
+            kl_loss_type = self.config.kl_loss_type
+            kl_topk = self.config.get("kl_topk_tokens", None)
+            if kl_loss_type in ("full_forward", "full_reverse"):
+                # Full KL requires logits from reference model
+                # For OPD full reverse KL, we always use ref_topk_indices here since teacher determines important tokens
+                select_keys.extend(["ref_logits_k", "ref_logsumexp", "ref_topk_indices"])
+                if self.config.get("kl_use_tail_sampling", False):
+                    select_keys.append("ref_log_prob")
+            else:
+                # Token-level KL
+                select_keys.append("ref_log_prob")
         batch = data.select(batch_keys=select_keys).batch
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
 
@@ -770,11 +1154,31 @@ class DataParallelPPOActor(BasePPOActor):
                     entropy_coeff = self.config.entropy_coeff
                     loss_agg_mode = self.config.loss_agg_mode
 
+                    use_full_kl = (self.config.use_kl_loss and self.config.kl_loss_type in ("full_forward", "full_reverse"))
+                    kl_topk = self.config.get('kl_topk_tokens', None) if use_full_kl else None
+
                     # all return: (bsz, response_length)
                     calculate_entropy = False
                     if entropy_coeff != 0:
                         calculate_entropy = True
-                    entropy, log_prob = self._forward_micro_batch(micro_batch=data, temperature=temperature, calculate_entropy=calculate_entropy)
+
+                    if use_full_kl and kl_topk is not None and kl_topk > 0:
+                        # Memory-efficient top-k mode: gather actor logits at ref's top-k indices
+                        # For OPD: we ALWAYS use ref_topk_indices (teacher determines important tokens)
+                        kl_topk_indices = data["ref_topk_indices"]
+                        entropy, log_prob, actor_kl_inputs = self._forward_micro_batch_with_logits(
+                            micro_batch=data, temperature=temperature,
+                            kl_topk_indices=kl_topk_indices,
+                        )
+                        actor_logits_k = actor_kl_inputs["logits_k"]
+                        actor_logsumexp = actor_kl_inputs["logsumexp"]
+                    elif use_full_kl:
+                        raise NotImplementedError("Full KL without top-k is not implemented yet due to memory constraints. Please set kl_topk_tokens > 0.")
+                    else:
+                        entropy, log_prob = self._forward_micro_batch(
+                            micro_batch=data, temperature=temperature,
+                            calculate_entropy=calculate_entropy,
+                        )
                     
                     loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
                     if loss_mode == "vanilla":
@@ -805,32 +1209,78 @@ class DataParallelPPOActor(BasePPOActor):
                         policy_loss = pg_loss
 
                     if self.config.use_kl_loss:
-                        ref_log_prob = data["ref_log_prob"]
-                        # compute kl loss
-                        kld = kl_penalty(logprob=log_prob, ref_logprob=ref_log_prob, kl_penalty=self.config.kl_loss_type)
-                        kl_loss = agg_loss(loss_mat=kld, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+                        if use_full_kl:
+                            # Full KL divergence computation (ema-pg style)
+                            use_kl_iw = self.config.get('use_kl_iw', False) # for importance sampling weight # 但我不太确定这个是否需要, 或许可以后续ablation一下?
 
-                        policy_loss = policy_loss + kl_loss * self.config.kl_loss_coef
-                        metrics["actor/kl_loss"] = kl_loss.detach().item()
-                        metrics["actor/kl_coef"] = self.config.kl_loss_coef
+                        if use_kl_iw: # Compute importance weight for off-policy correction
+                            log_kl_iw = (log_prob - old_log_prob).detach()
+                            log_kl_iw = torch.clamp(log_kl_iw, min=-20, max=20)
+                            kl_iw = torch.exp(log_kl_iw)
+                            # Apply optional clipping bounds
+                            kl_iw_clip_lower = self.config.get('kl_iw_clip_lower', None)
+                            kl_iw_clip_upper = self.config.get('kl_iw_clip_upper', None)
+                            if kl_iw_clip_lower is not None or kl_iw_clip_upper is not None:
+                                kl_iw = torch.clamp(kl_iw, min=kl_iw_clip_lower, max=kl_iw_clip_upper)
 
-                    if self.config.use_dynamic_bsz:
-                        # relative to the dynamic bsz
-                        loss = policy_loss * (len(data) / self.config.ppo_mini_batch_size)
+                        if kl_topk is not None and kl_topk > 0:
+                            # Memory-efficient top-k KL
+                            use_tail_sampling = self.config.get("kl_use_tail_sampling", False) # 这是别人的创新点, 我们paper不追求刷分的话就不使用了
+                            tail_kwargs = {}
+                            if use_tail_sampling:
+                                # For OPD: use ref_topk_indices for the tail mask
+                                tail_kwargs = dict(
+                                    actor_topk_indices=data["ref_topk_indices"],
+                                    ref_topk_indices=data["ref_topk_indices"],
+                                    sampled_indices=responses,
+                                    log_prob=log_prob,
+                                    ref_log_prob=data["ref_log_prob"],
+                                )
+                            kl_L1, kl_L2 = compute_memory_efficient_kl(
+                                actor_logits_k=actor_logits_k,
+                                actor_logsumexp=actor_logsumexp,
+                                ref_logits_k=data["ref_logits_k"],
+                                ref_logsumexp=data["ref_logsumexp"],
+                                kl_type=kl_loss_type,
+                                use_tail_sampling=use_tail_sampling,
+                                **tail_kwargs,
+                            )
+                            if use_kl_iw:
+                                kl_L2 = kl_L2 * kl_iw
+                            kld = kl_L1 + kl_L2
+                        else:
+                            raise NotImplementedError("Full KL without top-k is not implemented yet due to memory constraints. Please set kl_topk_tokens > 0.")
                     else:
-                        loss = policy_loss / self.gradient_accumulation
-                    loss.backward()
+                        # Token-level KL approximations
+                        ref_log_prob = data["ref_log_prob"]
+                        kld = kl_penalty(
+                            logprob=log_prob, ref_logprob=ref_log_prob,
+                            kl_penalty=self.config.kl_loss_type,
+                        )
 
-                    data = {
-                        "actor/pg_loss": pg_loss.detach().item(),
-                        "actor/pg_clipfrac": pg_clipfrac.detach().item(),
-                        "actor/ppo_kl": ppo_kl.detach().item(),
-                        "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
-                    }
-                    append_to_dict(metrics, data)
+                    kl_loss = agg_loss(loss_mat=kld, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
 
-                grad_norm = self._optimizer_step()
-                data = {"actor/grad_norm": grad_norm.detach().item()}
+                    policy_loss = policy_loss + kl_loss * self.config.kl_loss_coef
+                    metrics["actor/kl_loss"] = kl_loss.detach().item()
+                    metrics["actor/kl_coef"] = self.config.kl_loss_coef
+
+                if self.config.use_dynamic_bsz:
+                    # relative to the dynamic bsz
+                    loss = policy_loss * (len(data) / self.config.ppo_mini_batch_size)
+                else:
+                    loss = policy_loss / self.gradient_accumulation
+                loss.backward()
+
+                data = {
+                    "actor/pg_loss": pg_loss.detach().item(),
+                    "actor/pg_clipfrac": pg_clipfrac.detach().item(),
+                    "actor/ppo_kl": ppo_kl.detach().item(),
+                    "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
+                }
                 append_to_dict(metrics, data)
+
+            grad_norm = self._optimizer_step()
+            data = {"actor/grad_norm": grad_norm.detach().item()}
+            append_to_dict(metrics, data)
         self.actor_optimizer.zero_grad()
         return metrics

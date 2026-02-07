@@ -641,11 +641,16 @@ def kl_penalty(logprob: torch.FloatTensor, ref_logprob: torch.FloatTensor, kl_pe
         kld = (ratio - kl - 1).contiguous()
         return torch.clamp(kld, min=-10, max=10)
 
-    if kl_penalty == "full":
-        # so, here logprob and ref_logprob should contain the logits for every token in vocabulary
-        raise NotImplementedError
+    if kl_penalty in ("full_forward", "full_reverse", "full"):
+        # Full KL requires logits, not just log probabilities of sampled tokens.
+        # Users should set actor.kl_loss_type to "full_forward" or "full_reverse" in config.
+        raise ValueError(
+            f"kl_penalty='{kl_penalty}' requires full logits, not just log probabilities. "
+            "Set actor.kl_loss_type to 'full_forward' (KL(π_ref||π)) or 'full_reverse' (KL(π||π_ref)) "
+            "in your config."
+        )
 
-    raise NotImplementedError
+    raise NotImplementedError(f"Unknown kl_penalty type: {kl_penalty}")
 
 
 def compute_pf_ppo_reweight_data(
@@ -828,3 +833,159 @@ def compute_opd_advantage(
 #     response_mask,
 # ):
 #     raise NotImplementedError
+
+
+# =============================================================================
+# MEMORY-EFFICIENT TOP-K KL DIVERGENCE COMPUTATION
+# =============================================================================
+
+def compute_not_in_topk_mask(
+    sampled_indices: torch.LongTensor,
+    topk_indices: torch.LongTensor,
+) -> torch.BoolTensor:
+    """Return mask that is True where sampled token is NOT in top-k.
+
+    Args:
+        sampled_indices: The sampled token indices (responses), shape (batch, seq).
+        topk_indices: The top-k indices, shape (batch, seq, k).
+
+    Returns:
+        Mask tensor of shape (batch, seq), True where sampled token is NOT in top-k.
+    """
+    assert sampled_indices.dim() == 2, f"sampled_indices must be 2D, got {sampled_indices.dim()}D"
+    assert topk_indices.dim() == 3, f"topk_indices must be 3D, got {topk_indices.dim()}D"
+    batch, seq = sampled_indices.shape
+    assert topk_indices.shape[:2] == (batch, seq), \
+        f"topk_indices shape {topk_indices.shape[:2]} != sampled_indices shape {(batch, seq)}"
+    in_topk = (topk_indices == sampled_indices.unsqueeze(-1)).any(dim=-1)
+    return ~in_topk
+
+
+def compute_memory_efficient_kl(
+    actor_logits_k: torch.FloatTensor,
+    actor_logsumexp: torch.FloatTensor,
+    ref_logits_k: torch.FloatTensor,
+    ref_logsumexp: torch.FloatTensor,
+    kl_type: str = "full_reverse",
+    use_tail_sampling: bool = False,
+    actor_topk_indices: torch.LongTensor = None,
+    ref_topk_indices: torch.LongTensor = None,
+    sampled_indices: torch.LongTensor = None,
+    log_prob: torch.FloatTensor = None,
+    ref_log_prob: torch.FloatTensor = None,
+) -> tuple:
+    """Memory-efficient KL computation using pre-gathered logits.
+
+    Supports optional tail sampling correction that combines:
+    - Head term (L1): Exact KL over top-K tokens
+    - Tail term (L2): Sampled KL correction for tokens outside top-K
+
+    For full_reverse KL(π || π_ref): mask uses actor_topk_indices, L2 uses reverse sampled KL
+    For full_forward KL(π_ref || π): mask uses ref_topk_indices, L2 uses forward sampled KL
+
+    Returns L1 and L2 separately so that importance weighting can be applied
+    only to L2 (the sampled tail term).
+
+    Args:
+        actor_logits_k: Pre-gathered actor logits at top-k indices, shape (batch, response, k).
+        actor_logsumexp: Logsumexp of full actor logits, shape (batch, response).
+        ref_logits_k: Pre-gathered ref logits at top-k indices, shape (batch, response, k).
+        ref_logsumexp: Logsumexp of full ref logits, shape (batch, response).
+        kl_type: "full_forward" for KL(π_ref || π) or "full_reverse" for KL(π || π_ref).
+        use_tail_sampling: Whether to use tail sampling correction.
+        actor_topk_indices: Top-k indices from actor, shape (batch, response, k).
+        ref_topk_indices: Top-k indices from ref, shape (batch, response, k).
+        sampled_indices: Sampled token indices (responses), shape (batch, response).
+        log_prob: Current actor log prob at sampled token, shape (batch, response).
+        ref_log_prob: Ref log prob at sampled token, shape (batch, response).
+
+    Returns:
+        L1: Head term (exact KL over top-K), shape (batch, response).
+        L2: Tail term (sampled KL correction), shape (batch, response). Zero if use_tail_sampling=False.
+    """
+    assert actor_logits_k.dim() == 3
+    assert ref_logits_k.dim() == 3
+    assert actor_logsumexp.dim() == 2
+    assert ref_logsumexp.dim() == 2
+
+    batch, response, k = actor_logits_k.shape
+    assert ref_logits_k.shape == (batch, response, k)
+    assert actor_logsumexp.shape == (batch, response)
+    assert ref_logsumexp.shape == (batch, response)
+
+    if use_tail_sampling:
+        assert sampled_indices is not None
+        assert log_prob is not None
+        assert ref_log_prob is not None
+
+    # Convert to probabilities
+    # print(f"[DBG]: actor_logits_k: min={actor_logits_k.min().item():.4f}, max={actor_logits_k.max().item():.4f}, "
+    #       f"mean={actor_logits_k.mean().item():.4f}, dtype={actor_logits_k.dtype}")
+    # print(f"[DBG]: ref_logits_k: min={ref_logits_k.min().item():.4f}, max={ref_logits_k.max().item():.4f}, "
+    #       f"mean={ref_logits_k.mean().item():.4f}, dtype={ref_logits_k.dtype}")
+    # print(f"[DBG]: actor_logsumexp: min={actor_logsumexp.min().item():.4f}, max={actor_logsumexp.max().item():.4f}")
+    # print(f"[DBG]: ref_logsumexp: min={ref_logsumexp.min().item():.4f}, max={ref_logsumexp.max().item():.4f}")
+
+    # teacher_probs = torch.exp(ref_logits_k)  # (bs, resp_len, k)
+    # student_probs = torch.exp(actor_logits_k)  # (bs, resp_len, k)
+
+    # After line 926, add:
+    # print(f"teacher_probs: has_inf={teacher_probs.isinf().any().item()}, has_nan={teacher_probs.isnan().any().item()}, "
+    #       f"max={teacher_probs.max().item()}")
+    # print(f"student_probs: has_inf={student_probs.isinf().any().item()}, has_nan={student_probs.isnan().any().item()}, "
+    #       f"max={student_probs.max().item()}")
+    
+    # Normalize both distributions over top-k to get proper probability distributions
+    # teacher_probs_norm = teacher_probs / (teacher_probs.sum(dim=-1, keepdim=True) + 1e-10)
+    # student_probs_norm = student_probs / (student_probs.sum(dim=-1, keepdim=True) + 1e-10)
+    
+    # # # Compute log of normalized probs (with numerical stability)
+    # teacher_log_probs_norm = torch.log(teacher_probs_norm + 1e-10)
+    # student_log_probs_norm = torch.log(student_probs_norm + 1e-10)
+    
+    # KL(student || teacher) = sum_k student_norm(k) * (log student_norm(k) - log teacher_norm(k))
+
+    device = actor_logits_k.device
+
+    actor_logits_k = actor_logits_k.to(device=device)
+    ref_logits_k = ref_logits_k.to(device=device)
+    actor_logsumexp = actor_logsumexp.to(device=device)
+    ref_logsumexp = ref_logsumexp.to(device=device)
+
+    log_p_k = actor_logits_k - actor_logsumexp.unsqueeze(-1)
+    log_q_k = ref_logits_k - ref_logsumexp.unsqueeze(-1)
+    p_k = torch.exp(log_p_k)
+
+    if kl_type == "full_forward":
+        raise ValueError("full_forward KL(π_ref || π) is not supported in OPD.")
+        ref_probs_k = ref_log_probs_k.exp()
+        L1 = (ref_probs_k * (ref_log_probs_k - actor_log_probs_k)).sum(dim=-1)
+
+        if use_tail_sampling:
+            assert ref_topk_indices is not None
+            not_in_topk = compute_not_in_topk_mask(sampled_indices, ref_topk_indices)
+            logw = ref_log_prob - log_prob
+            logw = torch.clamp(logw, min=-20, max=20)
+            logr = log_prob - log_prob.detach()
+            sampled_forward_kl = logw.detach().exp() * logw + logr
+            L2 = not_in_topk.to(dtype=sampled_forward_kl.dtype) * sampled_forward_kl
+        else:
+            L2 = torch.zeros_like(L1)
+    else:
+        # full_reverse: KL(π || π_ref)
+        # actor_probs_k = actor_log_probs_k.exp()
+        # L1 = (actor_probs_k * (actor_log_probs_k - ref_log_probs_k)).sum(dim=-1)
+        # L1 = (student_probs_norm * (student_log_probs_norm - teacher_log_probs_norm)).sum(dim=-1)
+        L1 = (p_k * (log_p_k - log_q_k)).sum(dim=-1)
+
+        if use_tail_sampling:
+            assert actor_topk_indices is not None
+            not_in_topk = compute_not_in_topk_mask(sampled_indices, actor_topk_indices)
+            pg_ratio = (log_prob - log_prob.detach()).exp()
+            kl_at_sampled = (log_prob - ref_log_prob).detach() * pg_ratio
+            L2 = not_in_topk.to(dtype=kl_at_sampled.dtype) * kl_at_sampled
+        else:
+            L2 = torch.zeros_like(L1)
+    
+    return L1, L2
+

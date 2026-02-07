@@ -98,6 +98,8 @@ class AdvantageEstimator(str, Enum):
     GRPO_PASSK = "grpo_passk"
     GiGPO = 'gigpo'
     OPD = "opd" # add on-policy distillation
+    PLACE_HOLDER = "placeholder"  # for topk opd, where we do not compute advantage at all, 
+    # but still want to use the same code structure(and reserve for future combination with other adv estimator)
 
 
 @dataclass
@@ -373,6 +375,13 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=0.0, lam=1.0, num_re
             )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
+
+    elif adv_estimator == AdvantageEstimator.PLACE_HOLDER:
+        # for topk opd, we do not compute advantage at all, but still want to use the same code structure(and reserve for future combination with other adv estimator)
+        data.batch["advantages"] = torch.zeros_like(data.batch["token_level_scores"])
+        data.batch["returns"] = torch.zeros_like(data.batch["token_level_scores"])
+        data.batch["token_level_rewards"] = torch.zeros_like(data.batch["token_level_scores"])
+
     else:
         raise NotImplementedError
     return data
@@ -469,6 +478,7 @@ class RayPPOTrainer:
             AdvantageEstimator.REINFORCE_PLUS_PLUS_BASELINE,
             AdvantageEstimator.GiGPO,
             AdvantageEstimator.OPD,
+            AdvantageEstimator.PLACE_HOLDER,
         ]:
             self.use_critic = False
         else:
@@ -1227,22 +1237,41 @@ class RayPPOTrainer:
                             self.config.algorithm.get("opd", {}).get("topk", False)
                         )
                         opd_k = self.config.algorithm.get("opd", {}).get("k", 50)
+                        # These two will never happen at the same time
+                        kl_loss_type = self.config.actor_rollout_ref.actor.kl_loss_type
+                        kl_topk_k = self.config.actor_rollout_ref.actor.get('kl_topk_tokens', None)
+                        use_full_kl = kl_loss_type in ("full_forward", "full_reverse")
                         
+                        if use_opd_topk is True and kl_topk_k is not None:
+                            raise ValueError("algorithm.opd.topk and actor_rollout_ref.actor.kl_topk_tokens cannot be set together.")
+
                         # compute reference log_prob
                         with _timer("ref", timing_raw):
-                            if use_opd_topk:
-                                # Compute ref log prob with top-k for true KL divergence
-                                # Pass topk_k via meta_info (DP_COMPUTE_PROTO only accepts DataProto args)
-                                batch.meta_info["topk_k"] = opd_k
-                                if not self.ref_in_actor:
-                                    ref_log_prob = self.ref_policy_wg.compute_ref_log_prob_with_topk(batch)
+                            if use_full_kl:
+                                if kl_loss_type == "full_reverse":
+                                    # We need ref's topk indices to compute KL divergence
+                                    batch.meta_info["kl_topk_k"] = kl_topk_k
+                                    if not self.ref_in_actor:
+                                        ref_log_prob = self.ref_policy_wg.compute_ref_log_prob_with_logits(batch)
+                                    else:
+                                        ref_log_prob = self.actor_rollout_wg.compute_ref_log_prob_with_logits(batch)
                                 else:
-                                    ref_log_prob = self.actor_rollout_wg.compute_ref_log_prob_with_topk(batch)
-                            else:
-                                if not self.ref_in_actor:
-                                    ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
+                                    raise ValueError(f"Unsupported KL loss type: {kl_loss_type}. We only consider full_reverse KL loss type for now.")
+
+                            else: # fall into original implementation (use_opd_topk: topk KLD as advantage)
+                                if use_opd_topk:
+                                    # Compute ref log prob with top-k for true KL divergence
+                                    # Pass topk_k via meta_info (DP_COMPUTE_PROTO only accepts DataProto args)
+                                    batch.meta_info["topk_k"] = opd_k
+                                    if not self.ref_in_actor:
+                                        ref_log_prob = self.ref_policy_wg.compute_ref_log_prob_with_topk(batch)
+                                    else:
+                                        ref_log_prob = self.actor_rollout_wg.compute_ref_log_prob_with_topk(batch)
                                 else:
-                                    ref_log_prob = self.actor_rollout_wg.compute_ref_log_prob(batch)
+                                    if not self.ref_in_actor:
+                                        ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
+                                    else:
+                                        ref_log_prob = self.actor_rollout_wg.compute_ref_log_prob(batch)
                             batch = batch.union(ref_log_prob)
                         
                         # Compute student's log probs for teacher's top-k indices if using OPD topk

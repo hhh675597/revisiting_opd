@@ -752,6 +752,111 @@ class ActorRolloutRefWorker(Worker):
 
         return output
 
+    
+    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+    def compute_log_prob_with_logits(self, data: DataProto) -> DataProto:
+        """Compute log probability and extract logits for KL divergence computation.
+
+        This method is used for full KL computation where we need both log probs and logits.
+
+        Expects: data.meta_info["kl_topk_k"] = -1 (full) or >0 (top-k)
+
+        Returns DataProto with:
+            - old_log_probs: (batch, response_len)
+            - entropys: (batch, response_len)
+            - actor_topk_indices: (batch, response_len, k) only if kl_topk_k > 0
+
+        Note: actor_logits_k, actor_logsumexp are computed but not returned
+        since they are recomputed during training (actor weights change between rollout and update).
+        """
+        data = data.to('cuda')
+
+        assert self._is_rollout
+        if self._is_offload_param:
+            load_fsdp_model_to_gpu(self.actor_module_fsdp)
+
+        data.batch = data.batch.cuda()
+        # Set required meta_info fields for the actor
+        micro_batch_size = self.config.rollout.log_prob_micro_batch_size_per_gpu
+        data.meta_info['micro_batch_size'] = micro_batch_size
+        data.meta_info['temperature'] = self.config.rollout.temperature
+        data.meta_info['max_token_len'] = self.config.rollout.log_prob_max_token_len_per_gpu
+        data.meta_info['use_dynamic_bsz'] = self.config.rollout.log_prob_use_dynamic_bsz
+        meta_info = {'eos_token_id': self.tokenizer.eos_token_id, 'pad_token_id': self.tokenizer.pad_token_id}
+        data.meta_info.update(meta_info)
+
+        kl_topk_k = data.meta_info.pop("kl_topk_k")
+
+        with self.ulysses_sharding_manager:
+            data = self.ulysses_sharding_manager.preprocess_data(data)
+            log_probs, entropys, kl_inputs = self.actor.compute_log_prob_with_logits(data=data, kl_topk_k=kl_topk_k)
+
+            # Only return tensors that are actually used:
+            # - old_log_probs: used for PPO ratio
+            # - entropys: used for entropy bonus
+            # - actor_topk_indices: used for reverse KL with top-k
+            # Note: actor_logits_k, actor_logsumexp are NOT returned
+            # since actor recomputes them during training with updated weights
+            tensors = {
+                "old_log_probs": log_probs,
+                "entropys": entropys,
+            }
+            if kl_inputs["topk_indices"] is not None:
+                tensors["actor_topk_indices"] = kl_inputs["topk_indices"]
+
+            output = DataProto.from_dict(tensors=tensors)
+            output = self.ulysses_sharding_manager.postprocess_data(output)
+
+        output = output.to('cpu')
+
+        if self._is_offload_param:
+            offload_fsdp_model_to_cpu(self.actor_module_fsdp)
+            log_gpu_memory_usage('After compute log prob with logits', logger=logger)
+        return output
+
+    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+    def compute_ref_log_prob_with_logits(self, data: DataProto):
+        """Compute ref log prob + logits/logsumexp/topk_indices for memory-efficient KL."""
+
+        data = data.to('cuda')
+
+        assert self._is_ref
+        if self._is_offload_param:
+            load_fsdp_model_to_gpu(self.ref_policy.actor_module)
+
+        data.batch = data.batch.cuda()
+        micro_batch_size = self.config.ref.log_prob_micro_batch_size_per_gpu
+        data.meta_info['micro_batch_size'] = micro_batch_size
+        data.meta_info['temperature'] = self.config.rollout.temperature
+        data.meta_info['max_token_len'] = self.config.rollout.log_prob_max_token_len_per_gpu
+        data.meta_info['use_dynamic_bsz'] = self.config.rollout.log_prob_use_dynamic_bsz
+        meta_info = {'eos_token_id': self.tokenizer.eos_token_id, 'pad_token_id': self.tokenizer.pad_token_id}
+        data.meta_info.update(meta_info)
+
+        kl_topk_k = data.meta_info.pop("kl_topk_k")
+
+        with self.ulysses_sharding_manager:
+            data = self.ulysses_sharding_manager.preprocess_data(data)
+            ref_log_prob, _, ref_kl_inputs = self.ref_policy.compute_log_prob_with_logits(data=data, kl_topk_k=kl_topk_k)
+            output_tensors = {
+                "ref_log_prob": ref_log_prob,
+                "ref_logits_k": ref_kl_inputs["logits_k"],
+                "ref_logsumexp": ref_kl_inputs["logsumexp"],
+            }
+            if ref_kl_inputs["topk_indices"] is not None:
+                output_tensors["ref_topk_indices"] = ref_kl_inputs["topk_indices"]
+            output = DataProto.from_dict(tensors=output_tensors)
+            output = self.ulysses_sharding_manager.postprocess_data(output)
+
+        output = output.to('cpu')
+
+        from verl.utils.fsdp_utils import fsdp_version
+        if self.world_size > 1 and fsdp_version(self.ref_policy.actor_module) == 1:
+            self.ref_policy.actor_module._handle.reshard(True)
+
+        return output
+
+
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_log_prob_with_topk(self, data: DataProto):
         """Compute log probabilities along with top-k token indices and their log probs.
