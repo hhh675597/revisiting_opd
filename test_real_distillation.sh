@@ -13,7 +13,7 @@ export RAY_worker_register_timeout_seconds=600
 
 TIME_STAMP=$(date +"%m%d_%H%M%S")
 project_name='multitask_opd'
-exp_name='dbg_real_distillation_lr3e-6_k32_grad_nan'
+exp_name='dbg_real_distillation_lr3e-6_k50'
 
 set -x
 ENGINE=${1:-vllm}
@@ -40,7 +40,7 @@ MATH_TEACHER="/data/home/zdhs0010/agentic/model/OpenThinker3-7B"
 python3 -m verl.trainer.main_ppo_multitask \
     algorithm.adv_estimator=placeholder \
     actor_rollout_ref.actor.kl_loss_type=full_reverse \
-    +actor_rollout_ref.actor.kl_topk_tokens=32 \
+    +actor_rollout_ref.actor.kl_topk_tokens=50 \
     +multitask.enable=False \
     +multitask.batching_mode=sequential \
     +multitask.tasks.task0.name=alfworld \
