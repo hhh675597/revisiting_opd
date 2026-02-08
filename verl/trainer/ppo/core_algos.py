@@ -945,12 +945,22 @@ def compute_memory_efficient_kl(
     
     # KL(student || teacher) = sum_k student_norm(k) * (log student_norm(k) - log teacher_norm(k))
 
-    device = actor_logits_k.device
+    # print(f"[DEBUG KL] actor_logits_k: device={actor_logits_k.device}, dtype={actor_logits_k.dtype}, "
+    #   f"shape={actor_logits_k.shape}, has_nan={actor_logits_k.isnan().any()}, has_inf={actor_logits_k.isinf().any()}")
+    # print(f"[DEBUG KL] actor_logsumexp: device={actor_logsumexp.device}, dtype={actor_logsumexp.dtype}, "
+    #   f"has_nan={actor_logsumexp.isnan().any()}, has_inf={actor_logsumexp.isinf().any()}")
+    # print(f"[DEBUG KL] ref_logits_k: device={ref_logits_k.device}, dtype={ref_logits_k.dtype}, "
+    #   f"has_nan={ref_logits_k.isnan().any()}, has_inf={ref_logits_k.isinf().any()}")
+    # print(f"[DEBUG KL] ref_logsumexp: device={ref_logsumexp.device}, dtype={ref_logsumexp.dtype}, "
+    #   f"has_nan={ref_logsumexp.isnan().any()}, has_inf={ref_logsumexp.isinf().any()}")
 
-    actor_logits_k = actor_logits_k.to(device=device)
-    ref_logits_k = ref_logits_k.to(device=device)
-    actor_logsumexp = actor_logsumexp.to(device=device)
-    ref_logsumexp = ref_logsumexp.to(device=device)
+    device = actor_logits_k.device
+    dtype = actor_logits_k.dtype
+
+    actor_logits_k = actor_logits_k.to(device=device, dtype=dtype)
+    ref_logits_k = ref_logits_k.to(device=device, dtype=dtype)
+    actor_logsumexp = actor_logsumexp.to(device=device, dtype=dtype)
+    ref_logsumexp = ref_logsumexp.to(device=device, dtype=dtype)
 
     log_p_k = actor_logits_k - actor_logsumexp.unsqueeze(-1)
     log_q_k = ref_logits_k - ref_logsumexp.unsqueeze(-1)
