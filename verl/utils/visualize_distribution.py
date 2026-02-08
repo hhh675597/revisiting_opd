@@ -80,6 +80,7 @@ def create_html_visualization(
     output_path: Path,
     prompt_length: Optional[int] = None,
     extra_info: Optional[Dict] = None,
+    ref_top1_tokens: Optional[List[str]] = None,
 ) -> None:
     """
     Create an interactive HTML visualization of teacher vs student distributions.
@@ -94,6 +95,7 @@ def create_html_visualization(
         output_path: Path to save HTML file
         prompt_length: Length of prompt (to distinguish from response)
         extra_info: Additional information to display (e.g., rewards, episode info)
+        ref_top1_tokens: Reference model's top-1 token at each position (optional)
     """
     # Convert to numpy for easier manipulation
     teacher_log_probs = np.array(teacher_log_probs)
@@ -119,7 +121,7 @@ def create_html_visualization(
     # Build token data for JavaScript
     token_data = []
     for i, token in enumerate(tokens):
-        token_data.append({
+        token_info = {
             "token": token,
             "teacher_log_prob": float(teacher_log_probs[i]),
             "student_log_prob": float(student_log_probs[i]),
@@ -129,7 +131,13 @@ def create_html_visualization(
             "abs_prob_diff": float(abs_prob_diff[i]),
             "color": token_to_color(signed_prob_diff[i], max_abs_diff),
             "is_prompt": i < prompt_length if prompt_length else False,
-        })
+        }
+        
+        # Add reference model's top-1 token if available
+        if ref_top1_tokens is not None and i < len(ref_top1_tokens):
+            token_info["ref_top1_token"] = ref_top1_tokens[i]
+        
+        token_data.append(token_info)
     
     # Compute summary statistics (only for response tokens)
     if prompt_length and prompt_length < len(signed_prob_diff):
@@ -396,9 +404,16 @@ def create_html_visualization(
                     '(Policy &gt; Reference )' : 
                     (data.student_prob < data.teacher_prob ? '(Policy &lt; Reference )' : '(Equal)');
                 
+                const refTop1Html = data.ref_top1_token !== undefined ? 
+                    `<div class="tooltip-row" style="background-color: rgba(155, 89, 182, 0.1); padding: 4px; border-radius: 3px; margin: 4px 0;">
+                        <span class="tooltip-label">Ref Top-1 Token:</span> 
+                        <span style="font-family: 'Courier New', monospace; background-color: rgba(155, 89, 182, 0.2); padding: 2px 6px; border-radius: 2px;">"${{data.ref_top1_token}}"</span>
+                    </div>` : '';
+                
                 tooltip.innerHTML = `
                     <div class="tooltip-row"><span class="tooltip-label">Token:</span> "${{data.token}}"</div>
                     <div class="tooltip-row"><span class="tooltip-label">Position:</span> ${{idx}} ${{data.is_prompt ? '(Prompt)' : '(Response)'}}</div>
+                    ${{refTop1Html}}
                     <hr style="margin: 8px 0; border: none; border-top: 1px solid #555;">
                     <div class="tooltip-row">
                         <span class="tooltip-label">Reference (Teacher):</span> ${{(data.teacher_prob * 100).toFixed(2)}}%
@@ -478,6 +493,7 @@ def visualize_teacher_student_batch(
     output_dir: str,
     num_samples: int = 2,
     task_type: Optional[str] = None,
+    num_tokens: int = 1,
 ) -> List[Path]:
     """
     Visualize teacher vs student distributions for selected samples in a batch.
@@ -600,6 +616,26 @@ def visualize_teacher_student_batch(
             full_teacher_lp[response_start_in_tokens:response_start_in_tokens + num_to_copy] = teacher_lp[:num_to_copy]
             full_student_lp[response_start_in_tokens:response_start_in_tokens + num_to_copy] = student_lp[:num_to_copy]
         
+        # Extract and decode ref_topk_indices (top-(num_tokens) token at each position)
+        ref_top1_tokens = None
+        if 'ref_topk_indices' in batch.batch:
+            ref_topk_indices = batch.batch['ref_topk_indices'][sample_idx]  # Shape: (response_length, k)
+            
+            # Extract top-1 token (first column, index 0)
+            if ref_topk_indices.dim() >= 2 and ref_topk_indices.size(1) > 0:
+                ref_top1_indices = ref_topk_indices[:, 0].cpu().tolist()  # Get first column (top-1)
+                
+                # Decode the top-1 tokens
+                ref_top1_token_strings = [tokenizer.decode([token_id]) for token_id in ref_top1_indices]
+                
+                # Create full array aligned with tokens (pad prompt with empty strings)
+                ref_top1_tokens = [''] * len(tokens)
+                
+                # Fill in the response portion
+                num_ref_tokens = min(len(ref_top1_token_strings), num_valid_response_in_tokens)
+                for i in range(num_ref_tokens):
+                    ref_top1_tokens[response_start_in_tokens + i] = ref_top1_token_strings[i]
+        
         create_html_visualization(
             tokens=tokens,
             teacher_log_probs=full_teacher_lp.tolist(),
@@ -610,6 +646,7 @@ def visualize_teacher_student_batch(
             output_path=output_path,
             prompt_length=valid_prompt_length,
             extra_info=extra_info if extra_info else None,
+            ref_top1_tokens=ref_top1_tokens,
         )
         
         output_paths.append(output_path)

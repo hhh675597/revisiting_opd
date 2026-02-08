@@ -13,7 +13,7 @@ export RAY_worker_register_timeout_seconds=600
 
 TIME_STAMP=$(date +"%m%d_%H%M%S")
 project_name='multitask_opd'
-exp_name='math_lr1e-6_k32_normto1'
+exp_name='test_multitask_lr1e-6_k32'
 
 set -x
 ENGINE=${1:-vllm}
@@ -28,7 +28,7 @@ train_data_size=16
 val_data_size=128
 group_size=8 
 
-MULTITASK_DATA_DIR="/data/home/zdhs0010/agentic/verl-agent-multi/data/math_opd"
+MULTITASK_DATA_DIR="/data/home/zdhs0010/agentic/verl-agent-multi/data/multitask_data_test"
 TRAIN_DATA="${MULTITASK_DATA_DIR}/train.parquet"
 VAL_DATA="${MULTITASK_DATA_DIR}/test.parquet"
 
@@ -41,7 +41,7 @@ python3 -m verl.trainer.main_ppo_multitask \
     algorithm.adv_estimator=placeholder \
     actor_rollout_ref.actor.kl_loss_type=full_reverse \
     +actor_rollout_ref.actor.kl_topk_tokens=32 \
-    +multitask.enable=False \
+    +multitask.enable=True \
     +multitask.batching_mode=sequential \
     +multitask.tasks.task0.name=alfworld \
     +multitask.tasks.task0.env_name=alfworld/AlfredTWEnv \
@@ -50,7 +50,6 @@ python3 -m verl.trainer.main_ppo_multitask \
     +multitask.tasks.task1.name=math \
     +multitask.tasks.task1.env_name=math \
     +multitask.tasks.task1.ref_model_path=${MATH_TEACHER} \
-    actor_rollout_ref.ref.model.path=${MATH_TEACHER} \
     data.train_files=${TRAIN_DATA} \
     data.val_files=${VAL_DATA} \
     data.train_batch_size=${train_data_size} \
@@ -87,7 +86,7 @@ python3 -m verl.trainer.main_ppo_multitask \
     actor_rollout_ref.actor.use_invalid_action_penalty=False \
     actor_rollout_ref.actor.invalid_action_penalty_coef=0.0 \
     algorithm.use_kl_in_reward=False \
-    env.env_name=math \
+    env.env_name=multitask \
     env.seed=0 \
     env.max_steps=30 \
     env.rollout.n=${group_size} \
@@ -107,9 +106,8 @@ python3 -m verl.trainer.main_ppo_multitask \
     trainer.resume_mode=auto \
     +trainer.visualize_distribution=true \
     +trainer.visualize_distribution_freq=1 \
-    +trainer.visualize_distribution_samples=2 \
+    +trainer.visualize_distribution_samples=1 \
     +trainer.visualize_distribution_dir="${CKPTS_DIR}/visualizations" \
-    +trainer.visualize_distribution_ref_tokens=3 \
     ray_init.num_cpus=96 \
     2>&1 | tee /data/home/zdhs0010/agentic/verl-agent-multi/data/logs/multitask/${exp_name}_${TIME_STAMP}.log
 
