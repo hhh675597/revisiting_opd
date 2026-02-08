@@ -1269,6 +1269,9 @@ class DataParallelPPOActor(BasePPOActor):
                     loss = policy_loss * (len(data) / self.config.ppo_mini_batch_size)
                 else:
                     loss = policy_loss / self.gradient_accumulation
+                    
+                # print(f"[DEBUG LOSS] loss: device={loss.device}, dtype={loss.dtype}, "
+                #     f"value={loss.item()}, is_nan={loss.isnan().any()}, is_inf={loss.isinf().any()}")
                 loss.backward()
 
                 data = {
