@@ -244,6 +244,15 @@ class DataParallelPPOActor(BasePPOActor):
         else:
             grad_norm = torch.nn.utils.clip_grad_norm_(self.actor_module.parameters(), max_norm=self.config.grad_clip)
 
+        # Debug: find which param has mismatched grad
+        # print(f"[DEBUG OPTIMIZER] Checking param/grad dtypes and devices...")
+        # for i, (name, p) in enumerate(self.actor_module.named_parameters()):
+        #     if p.grad is not None:
+        #         if p.dtype != p.grad.dtype or p.device != p.grad.device:
+        #             print(f"  MISMATCH param[{i}] {name}: "
+        #                   f"param(device={p.device}, dtype={p.dtype}, shape={p.shape}) vs "
+        #                   f"grad(device={p.grad.device}, dtype={p.grad.dtype}, shape={p.grad.shape})")
+
         # if grad_norm is not finite, skip the update
         if not torch.isfinite(grad_norm):
             print(f"WARN: rank {torch.distributed.get_rank()} grad_norm is not finite: {grad_norm}")
@@ -1213,77 +1222,78 @@ class DataParallelPPOActor(BasePPOActor):
                             # Full KL divergence computation (ema-pg style)
                             use_kl_iw = self.config.get('use_kl_iw', False) # for importance sampling weight # 但我不太确定这个是否需要, 或许可以后续ablation一下?
 
-                        if use_kl_iw: # Compute importance weight for off-policy correction
-                            log_kl_iw = (log_prob - old_log_prob).detach()
-                            log_kl_iw = torch.clamp(log_kl_iw, min=-20, max=20)
-                            kl_iw = torch.exp(log_kl_iw)
-                            # Apply optional clipping bounds
-                            kl_iw_clip_lower = self.config.get('kl_iw_clip_lower', None)
-                            kl_iw_clip_upper = self.config.get('kl_iw_clip_upper', None)
-                            if kl_iw_clip_lower is not None or kl_iw_clip_upper is not None:
-                                kl_iw = torch.clamp(kl_iw, min=kl_iw_clip_lower, max=kl_iw_clip_upper)
+                            if use_kl_iw: # Compute importance weight for off-policy correction
+                                log_kl_iw = (log_prob - old_log_prob).detach()
+                                log_kl_iw = torch.clamp(log_kl_iw, min=-20, max=20)
+                                kl_iw = torch.exp(log_kl_iw)
+                                # Apply optional clipping bounds
+                                kl_iw_clip_lower = self.config.get('kl_iw_clip_lower', None)
+                                kl_iw_clip_upper = self.config.get('kl_iw_clip_upper', None)
+                                if kl_iw_clip_lower is not None or kl_iw_clip_upper is not None:
+                                    kl_iw = torch.clamp(kl_iw, min=kl_iw_clip_lower, max=kl_iw_clip_upper)
 
-                        if kl_topk is not None and kl_topk > 0:
-                            # Memory-efficient top-k KL
-                            use_tail_sampling = self.config.get("kl_use_tail_sampling", False) # 这是别人的创新点, 我们paper不追求刷分的话就不使用了
-                            tail_kwargs = {}
-                            if use_tail_sampling:
-                                # For OPD: use ref_topk_indices for the tail mask
-                                tail_kwargs = dict(
-                                    actor_topk_indices=data["ref_topk_indices"],
-                                    ref_topk_indices=data["ref_topk_indices"],
-                                    sampled_indices=responses,
-                                    log_prob=log_prob,
-                                    ref_log_prob=data["ref_log_prob"],
+                            if kl_topk is not None and kl_topk > 0:
+                                # Memory-efficient top-k KL
+                                use_tail_sampling = self.config.get("kl_use_tail_sampling", False) # 这是别人的创新点, 我们paper不追求刷分的话就不使用了
+                                tail_kwargs = {}
+                                if use_tail_sampling:
+                                    # For OPD: use ref_topk_indices for the tail mask
+                                    tail_kwargs = dict(
+                                        actor_topk_indices=data["ref_topk_indices"],
+                                        ref_topk_indices=data["ref_topk_indices"],
+                                        sampled_indices=responses,
+                                        log_prob=log_prob,
+                                        ref_log_prob=data["ref_log_prob"],
+                                    )
+                                kl_L1, kl_L2 = compute_memory_efficient_kl(
+                                    actor_logits_k=actor_logits_k,
+                                    actor_logsumexp=actor_logsumexp,
+                                    ref_logits_k=data["ref_logits_k"],
+                                    ref_logsumexp=data["ref_logsumexp"],
+                                    kl_type=kl_loss_type,
+                                    use_tail_sampling=use_tail_sampling,
+                                    **tail_kwargs,
                                 )
-                            kl_L1, kl_L2 = compute_memory_efficient_kl(
-                                actor_logits_k=actor_logits_k,
-                                actor_logsumexp=actor_logsumexp,
-                                ref_logits_k=data["ref_logits_k"],
-                                ref_logsumexp=data["ref_logsumexp"],
-                                kl_type=kl_loss_type,
-                                use_tail_sampling=use_tail_sampling,
-                                **tail_kwargs,
-                            )
-                            if use_kl_iw:
-                                kl_L2 = kl_L2 * kl_iw
-                            kld = kl_L1 + kl_L2
+                                if use_kl_iw:
+                                    kl_L2 = kl_L2 * kl_iw
+                                kld = kl_L1 + kl_L2
+                            else:
+                                raise NotImplementedError("Full KL without top-k is not implemented yet due to memory constraints. Please set kl_topk_tokens > 0.")
                         else:
-                            raise NotImplementedError("Full KL without top-k is not implemented yet due to memory constraints. Please set kl_topk_tokens > 0.")
+                            # Token-level KL approximations
+                            ref_log_prob = data["ref_log_prob"]
+                            kld = kl_penalty(
+                                logprob=log_prob, ref_logprob=ref_log_prob,
+                                kl_penalty=self.config.kl_loss_type,
+                            )
+
+                        kl_loss = agg_loss(loss_mat=kld, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+
+                        policy_loss = policy_loss + kl_loss * self.config.kl_loss_coef
+                        metrics["actor/kl_loss"] = kl_loss.detach().item()
+                        metrics["actor/kl_coef"] = self.config.kl_loss_coef
+
+                    if self.config.use_dynamic_bsz:
+                        # relative to the dynamic bsz
+                        loss = policy_loss * (len(data) / self.config.ppo_mini_batch_size)
                     else:
-                        # Token-level KL approximations
-                        ref_log_prob = data["ref_log_prob"]
-                        kld = kl_penalty(
-                            logprob=log_prob, ref_logprob=ref_log_prob,
-                            kl_penalty=self.config.kl_loss_type,
-                        )
-
-                    kl_loss = agg_loss(loss_mat=kld, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
-
-                    policy_loss = policy_loss + kl_loss * self.config.kl_loss_coef
-                    metrics["actor/kl_loss"] = kl_loss.detach().item()
-                    metrics["actor/kl_coef"] = self.config.kl_loss_coef
-
-                if self.config.use_dynamic_bsz:
-                    # relative to the dynamic bsz
-                    loss = policy_loss * (len(data) / self.config.ppo_mini_batch_size)
-                else:
-                    loss = policy_loss / self.gradient_accumulation
+                        loss = policy_loss / self.gradient_accumulation
                     
-                # print(f"[DEBUG LOSS] loss: device={loss.device}, dtype={loss.dtype}, "
-                #     f"value={loss.item()}, is_nan={loss.isnan().any()}, is_inf={loss.isinf().any()}")
-                loss.backward()
+                    # print(f"[DEBUG LOSS] loss: device={loss.device}, dtype={loss.dtype}, "
+                    #     f"value={loss.item()}, is_nan={loss.isnan().any()}, is_inf={loss.isinf().any()}")
+                    loss.backward()
 
-                data = {
-                    "actor/pg_loss": pg_loss.detach().item(),
-                    "actor/pg_clipfrac": pg_clipfrac.detach().item(),
-                    "actor/ppo_kl": ppo_kl.detach().item(),
-                    "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
-                }
+                    data = {
+                        "actor/pg_loss": pg_loss.detach().item(),
+                        "actor/pg_clipfrac": pg_clipfrac.detach().item(),
+                        "actor/ppo_kl": ppo_kl.detach().item(),
+                        "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
+                    }
+                    append_to_dict(metrics, data)
+
+                grad_norm = self._optimizer_step()
+                data = {"actor/grad_norm": grad_norm.detach().item()}
                 append_to_dict(metrics, data)
-
-            grad_norm = self._optimizer_step()
-            data = {"actor/grad_norm": grad_norm.detach().item()}
-            append_to_dict(metrics, data)
-        self.actor_optimizer.zero_grad()
+                self.actor_optimizer.zero_grad()
+        
         return metrics

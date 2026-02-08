@@ -926,22 +926,21 @@ def compute_memory_efficient_kl(
     # print(f"[DBG]: actor_logsumexp: min={actor_logsumexp.min().item():.4f}, max={actor_logsumexp.max().item():.4f}")
     # print(f"[DBG]: ref_logsumexp: min={ref_logsumexp.min().item():.4f}, max={ref_logsumexp.max().item():.4f}")
 
-    # teacher_probs = torch.exp(ref_logits_k)  # (bs, resp_len, k)
-    # student_probs = torch.exp(actor_logits_k)  # (bs, resp_len, k)
-
-    # After line 926, add:
     # print(f"teacher_probs: has_inf={teacher_probs.isinf().any().item()}, has_nan={teacher_probs.isnan().any().item()}, "
     #       f"max={teacher_probs.max().item()}")
     # print(f"student_probs: has_inf={student_probs.isinf().any().item()}, has_nan={student_probs.isnan().any().item()}, "
     #       f"max={student_probs.max().item()}")
     
     # Normalize both distributions over top-k to get proper probability distributions
+    # teacher_probs = torch.exp(ref_logits_k)  # (bs, resp_len, k)
+    # student_probs = torch.exp(actor_logits_k)  # (bs, resp_len, k)
     # teacher_probs_norm = teacher_probs / (teacher_probs.sum(dim=-1, keepdim=True) + 1e-10)
     # student_probs_norm = student_probs / (student_probs.sum(dim=-1, keepdim=True) + 1e-10)
-    
-    # # # Compute log of normalized probs (with numerical stability)
     # teacher_log_probs_norm = torch.log(teacher_probs_norm + 1e-10)
     # student_log_probs_norm = torch.log(student_probs_norm + 1e-10)
+    # teacher_log_probs_norm = torch.nn.functional.log_softmax(ref_logits_k, dim=-1)
+    # student_log_probs_norm = torch.nn.functional.log_softmax(actor_logits_k, dim=-1)
+    # student_probs_norm = torch.exp(student_log_probs_norm)
     
     # KL(student || teacher) = sum_k student_norm(k) * (log student_norm(k) - log teacher_norm(k))
 
