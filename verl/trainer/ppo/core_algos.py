@@ -938,9 +938,9 @@ def compute_memory_efficient_kl(
     # student_probs_norm = student_probs / (student_probs.sum(dim=-1, keepdim=True) + 1e-10)
     # teacher_log_probs_norm = torch.log(teacher_probs_norm + 1e-10)
     # student_log_probs_norm = torch.log(student_probs_norm + 1e-10)
-    # teacher_log_probs_norm = torch.nn.functional.log_softmax(ref_logits_k, dim=-1)
-    # student_log_probs_norm = torch.nn.functional.log_softmax(actor_logits_k, dim=-1)
-    # student_probs_norm = torch.exp(student_log_probs_norm)
+    teacher_log_probs_norm = torch.nn.functional.log_softmax(ref_logits_k, dim=-1)
+    student_log_probs_norm = torch.nn.functional.log_softmax(actor_logits_k, dim=-1)
+    student_probs_norm = torch.exp(student_log_probs_norm)
     
     # KL(student || teacher) = sum_k student_norm(k) * (log student_norm(k) - log teacher_norm(k))
 
@@ -953,17 +953,17 @@ def compute_memory_efficient_kl(
     # print(f"[DEBUG KL] ref_logsumexp: device={ref_logsumexp.device}, dtype={ref_logsumexp.dtype}, "
     #   f"has_nan={ref_logsumexp.isnan().any()}, has_inf={ref_logsumexp.isinf().any()}")
 
-    device = actor_logits_k.device
-    dtype = actor_logits_k.dtype
+    # device = actor_logits_k.device
+    # dtype = actor_logits_k.dtype
 
-    actor_logits_k = actor_logits_k.to(device=device, dtype=dtype)
-    ref_logits_k = ref_logits_k.to(device=device, dtype=dtype)
-    actor_logsumexp = actor_logsumexp.to(device=device, dtype=dtype)
-    ref_logsumexp = ref_logsumexp.to(device=device, dtype=dtype)
+    # actor_logits_k = actor_logits_k.to(device=device, dtype=dtype)
+    # ref_logits_k = ref_logits_k.to(device=device, dtype=dtype)
+    # actor_logsumexp = actor_logsumexp.to(device=device, dtype=dtype)
+    # ref_logsumexp = ref_logsumexp.to(device=device, dtype=dtype)
 
-    log_p_k = actor_logits_k - actor_logsumexp.unsqueeze(-1)
-    log_q_k = ref_logits_k - ref_logsumexp.unsqueeze(-1)
-    p_k = torch.exp(log_p_k)
+    # log_p_k = actor_logits_k - actor_logsumexp.unsqueeze(-1)
+    # log_q_k = ref_logits_k - ref_logsumexp.unsqueeze(-1)
+    # p_k = torch.exp(log_p_k)
 
     if kl_type == "full_forward":
         raise ValueError("full_forward KL(π_ref || π) is not supported in OPD.")
@@ -984,8 +984,8 @@ def compute_memory_efficient_kl(
         # full_reverse: KL(π || π_ref)
         # actor_probs_k = actor_log_probs_k.exp()
         # L1 = (actor_probs_k * (actor_log_probs_k - ref_log_probs_k)).sum(dim=-1)
-        # L1 = (student_probs_norm * (student_log_probs_norm - teacher_log_probs_norm)).sum(dim=-1)
-        L1 = (p_k * (log_p_k - log_q_k)).sum(dim=-1)
+        L1 = (student_probs_norm * (student_log_probs_norm - teacher_log_probs_norm)).sum(dim=-1)
+        # L1 = (p_k * (log_p_k - log_q_k)).sum(dim=-1)
 
         if use_tail_sampling:
             assert actor_topk_indices is not None

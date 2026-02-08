@@ -1308,6 +1308,7 @@ class RayPPOTrainer:
                                         output_dir=output_dir,
                                         num_samples=self.config.trainer.get("visualize_distribution_samples", 2),
                                         task_type=task_type,
+                                        num_tokens=self.config.trainer.get("visualize_distribution_ref_tokens", 1),
                                     )
                                 except Exception as e:
                                     print(f"[Warning] Failed to generate distribution visualization: {e}")

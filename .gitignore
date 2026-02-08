@@ -15,6 +15,7 @@ tensorboard_log/
 mlruns/
 mlflow.db
 .cursor/
+**/*.json
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
