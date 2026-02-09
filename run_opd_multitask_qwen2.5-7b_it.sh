@@ -13,7 +13,7 @@ export RAY_worker_register_timeout_seconds=600
 
 TIME_STAMP=$(date +"%m%d_%H%M%S")
 project_name='multitask_opd'
-exp_name='test_multitask_lr1e-6_k32'
+exp_name='test_multitask_lr1e-6_k32_normto1_think'
 
 set -x
 ENGINE=${1:-vllm}
@@ -41,6 +41,7 @@ python3 -m verl.trainer.main_ppo_multitask \
     algorithm.adv_estimator=placeholder \
     actor_rollout_ref.actor.kl_loss_type=full_reverse \
     +actor_rollout_ref.actor.kl_topk_tokens=32 \
+    +actor_rollout_ref.actor.norm_to_one_for_kl=False \
     +multitask.enable=True \
     +multitask.batching_mode=sequential \
     +multitask.tasks.task0.name=alfworld \
@@ -97,7 +98,7 @@ python3 -m verl.trainer.main_ppo_multitask \
     trainer.experiment_name="${exp_name}" \
     trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \
-    trainer.save_freq=10 \
+    trainer.save_freq=20 \
     trainer.test_freq=10 \
     trainer.total_epochs=1 \
     trainer.val_before_train=False \
