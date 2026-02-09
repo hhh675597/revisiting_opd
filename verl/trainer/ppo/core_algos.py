@@ -873,6 +873,7 @@ def compute_memory_efficient_kl(
     sampled_indices: torch.LongTensor = None,
     log_prob: torch.FloatTensor = None,
     ref_log_prob: torch.FloatTensor = None,
+    norm_to_one_for_kl: bool = False,
 ) -> tuple:
     """Memory-efficient KL computation using pre-gathered logits.
 
@@ -938,9 +939,17 @@ def compute_memory_efficient_kl(
     # student_probs_norm = student_probs / (student_probs.sum(dim=-1, keepdim=True) + 1e-10)
     # teacher_log_probs_norm = torch.log(teacher_probs_norm + 1e-10)
     # student_log_probs_norm = torch.log(student_probs_norm + 1e-10)
-    teacher_log_probs_norm = torch.nn.functional.log_softmax(ref_logits_k, dim=-1)
-    student_log_probs_norm = torch.nn.functional.log_softmax(actor_logits_k, dim=-1)
-    student_probs_norm = torch.exp(student_log_probs_norm)
+    if norm_to_one_for_kl:
+        teacher_log_probs_norm = torch.nn.functional.log_softmax(ref_logits_k, dim=-1)
+        student_log_probs_norm = torch.nn.functional.log_softmax(actor_logits_k, dim=-1)
+        student_probs_norm = torch.exp(student_log_probs_norm)
+        L1 = (student_probs_norm * (student_log_probs_norm - teacher_log_probs_norm)).sum(dim=-1)
+    else:
+        log_p_k = actor_logits_k - actor_logsumexp.unsqueeze(-1)
+        log_q_k = ref_logits_k - ref_logsumexp.unsqueeze(-1)
+        p_k = torch.exp(log_p_k)
+        L1 = (p_k * (log_p_k - log_q_k)).sum(dim=-1)
+
     
     # KL(student || teacher) = sum_k student_norm(k) * (log student_norm(k) - log teacher_norm(k))
 
@@ -961,9 +970,7 @@ def compute_memory_efficient_kl(
     # actor_logsumexp = actor_logsumexp.to(device=device, dtype=dtype)
     # ref_logsumexp = ref_logsumexp.to(device=device, dtype=dtype)
 
-    # log_p_k = actor_logits_k - actor_logsumexp.unsqueeze(-1)
-    # log_q_k = ref_logits_k - ref_logsumexp.unsqueeze(-1)
-    # p_k = torch.exp(log_p_k)
+
 
     if kl_type == "full_forward":
         raise ValueError("full_forward KL(π_ref || π) is not supported in OPD.")
@@ -980,21 +987,17 @@ def compute_memory_efficient_kl(
             L2 = not_in_topk.to(dtype=sampled_forward_kl.dtype) * sampled_forward_kl
         else:
             L2 = torch.zeros_like(L1)
-    else:
-        # full_reverse: KL(π || π_ref)
-        # actor_probs_k = actor_log_probs_k.exp()
-        # L1 = (actor_probs_k * (actor_log_probs_k - ref_log_probs_k)).sum(dim=-1)
-        L1 = (student_probs_norm * (student_log_probs_norm - teacher_log_probs_norm)).sum(dim=-1)
-        # L1 = (p_k * (log_p_k - log_q_k)).sum(dim=-1)
 
-        if use_tail_sampling:
-            assert actor_topk_indices is not None
-            not_in_topk = compute_not_in_topk_mask(sampled_indices, actor_topk_indices)
-            pg_ratio = (log_prob - log_prob.detach()).exp()
-            kl_at_sampled = (log_prob - ref_log_prob).detach() * pg_ratio
-            L2 = not_in_topk.to(dtype=kl_at_sampled.dtype) * kl_at_sampled
-        else:
-            L2 = torch.zeros_like(L1)
+
+
+    if use_tail_sampling:
+        assert actor_topk_indices is not None
+        not_in_topk = compute_not_in_topk_mask(sampled_indices, actor_topk_indices)
+        pg_ratio = (log_prob - log_prob.detach()).exp()
+        kl_at_sampled = (log_prob - ref_log_prob).detach() * pg_ratio
+        L2 = not_in_topk.to(dtype=kl_at_sampled.dtype) * kl_at_sampled
+    else:
+        L2 = torch.zeros_like(L1)
     
     return L1, L2
 

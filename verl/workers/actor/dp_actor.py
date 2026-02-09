@@ -1252,6 +1252,7 @@ class DataParallelPPOActor(BasePPOActor):
                                     ref_logsumexp=data["ref_logsumexp"],
                                     kl_type=kl_loss_type,
                                     use_tail_sampling=use_tail_sampling,
+                                    norm_to_one_for_kl=self.config.get("norm_to_one_for_kl", True),
                                     **tail_kwargs,
                                 )
                                 if use_kl_iw:
