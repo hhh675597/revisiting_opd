@@ -107,6 +107,7 @@ python3 -m verl.trainer.main_ppo_multitask \
     +trainer.visualize_distribution=true \
     +trainer.visualize_distribution_freq=1 \
     +trainer.visualize_distribution_samples=1 \
+    +trainer.visualize_distribution_ref_tokens=3 \
     +trainer.visualize_distribution_dir="${CKPTS_DIR}/visualizations" \
     ray_init.num_cpus=96 \
     2>&1 | tee /data/home/zdhs0010/agentic/verl-agent-multi/data/logs/multitask/${exp_name}_${TIME_STAMP}.log

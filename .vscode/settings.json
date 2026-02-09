@@ -13,5 +13,5 @@
     },
     "iis.configDir": "",
     "git.ignoreLimitWarning": true,
-    "livePreview.defaultPreviewPath": "/ckpts/dbg_topk_0206_093924/visualizations/step000030_sample0_unknown.html"
+    "livePreview.defaultPreviewPath": "/ckpts/test_multitask_lr1e-6_k32_0208_224111/visualizations/step000001_sample0_math.html"
 }

@@ -80,7 +80,7 @@ def create_html_visualization(
     output_path: Path,
     prompt_length: Optional[int] = None,
     extra_info: Optional[Dict] = None,
-    ref_top1_tokens: Optional[List[str]] = None,
+    ref_topk_tokens: Optional[List[List[str]]] = None,
 ) -> None:
     """
     Create an interactive HTML visualization of teacher vs student distributions.
@@ -95,7 +95,8 @@ def create_html_visualization(
         output_path: Path to save HTML file
         prompt_length: Length of prompt (to distinguish from response)
         extra_info: Additional information to display (e.g., rewards, episode info)
-        ref_top1_tokens: Reference model's top-1 token at each position (optional)
+        ref_topk_tokens: Reference model's top-k tokens at each position (optional).
+            ref_topk_tokens[i] is a list of token strings (rank 1, 2, ..., k).
     """
     # Convert to numpy for easier manipulation
     teacher_log_probs = np.array(teacher_log_probs)
@@ -133,9 +134,9 @@ def create_html_visualization(
             "is_prompt": i < prompt_length if prompt_length else False,
         }
         
-        # Add reference model's top-1 token if available
-        if ref_top1_tokens is not None and i < len(ref_top1_tokens):
-            token_info["ref_top1_token"] = ref_top1_tokens[i]
+        # Add reference model's top-k tokens if available
+        if ref_topk_tokens is not None and i < len(ref_topk_tokens) and ref_topk_tokens[i]:
+            token_info["ref_topk_tokens"] = ref_topk_tokens[i]
         
         token_data.append(token_info)
     
@@ -404,16 +405,16 @@ def create_html_visualization(
                     '(Policy &gt; Reference )' : 
                     (data.student_prob < data.teacher_prob ? '(Policy &lt; Reference )' : '(Equal)');
                 
-                const refTop1Html = data.ref_top1_token !== undefined ? 
+                const refTopkHtml = data.ref_topk_tokens !== undefined && data.ref_topk_tokens.length > 0 ?
                     `<div class="tooltip-row" style="background-color: rgba(155, 89, 182, 0.1); padding: 4px; border-radius: 3px; margin: 4px 0;">
-                        <span class="tooltip-label">Ref Top-1 Token:</span> 
-                        <span style="font-family: 'Courier New', monospace; background-color: rgba(155, 89, 182, 0.2); padding: 2px 6px; border-radius: 2px;">"${{data.ref_top1_token}}"</span>
+                        <span class="tooltip-label">Ref Top-${{data.ref_topk_tokens.length}} Tokens:</span>
+                        ${{data.ref_topk_tokens.map((t, r) => `<span style="display: block; font-family: 'Courier New', monospace; margin: 2px 0;">${{r + 1}}. "${{t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')}}"</span>`).join('')}}
                     </div>` : '';
                 
                 tooltip.innerHTML = `
                     <div class="tooltip-row"><span class="tooltip-label">Token:</span> "${{data.token}}"</div>
                     <div class="tooltip-row"><span class="tooltip-label">Position:</span> ${{idx}} ${{data.is_prompt ? '(Prompt)' : '(Response)'}}</div>
-                    ${{refTop1Html}}
+                    ${{refTopkHtml}}
                     <hr style="margin: 8px 0; border: none; border-top: 1px solid #555;">
                     <div class="tooltip-row">
                         <span class="tooltip-label">Reference (Teacher):</span> ${{(data.teacher_prob * 100).toFixed(2)}}%
@@ -507,6 +508,7 @@ def visualize_teacher_student_batch(
         output_dir: Directory to save HTML files
         num_samples: Number of samples to visualize (default: 2)
         task_type: Task type for this batch (optional, extracted from batch if None)
+        num_tokens: Number of ref top-k tokens to show per position (default: 1)
     
     Returns:
         List of paths to generated HTML files
@@ -616,25 +618,26 @@ def visualize_teacher_student_batch(
             full_teacher_lp[response_start_in_tokens:response_start_in_tokens + num_to_copy] = teacher_lp[:num_to_copy]
             full_student_lp[response_start_in_tokens:response_start_in_tokens + num_to_copy] = student_lp[:num_to_copy]
         
-        # Extract and decode ref_topk_indices (top-(num_tokens) token at each position)
-        ref_top1_tokens = None
+        # Extract and decode ref_topk_indices (top num_tokens at each position)
+        ref_topk_tokens = None
         if 'ref_topk_indices' in batch.batch:
             ref_topk_indices = batch.batch['ref_topk_indices'][sample_idx]  # Shape: (response_length, k)
             
-            # Extract top-1 token (first column, index 0)
             if ref_topk_indices.dim() >= 2 and ref_topk_indices.size(1) > 0:
-                ref_top1_indices = ref_topk_indices[:, 0].cpu().tolist()  # Get first column (top-1)
+                k = min(num_tokens, ref_topk_indices.size(1))
+                # ref_topk_indices[:, :k] -> (response_length, k)
+                indices_per_pos = ref_topk_indices[:, :k].cpu().tolist()
                 
-                # Decode the top-1 tokens
-                ref_top1_token_strings = [tokenizer.decode([token_id]) for token_id in ref_top1_indices]
+                # Decode: for each position, list of k token strings
+                ref_topk_token_strings = []
+                for pos_indices in indices_per_pos:
+                    ref_topk_token_strings.append([tokenizer.decode([tid]) for tid in pos_indices])
                 
-                # Create full array aligned with tokens (pad prompt with empty strings)
-                ref_top1_tokens = [''] * len(tokens)
-                
-                # Fill in the response portion
-                num_ref_tokens = min(len(ref_top1_token_strings), num_valid_response_in_tokens)
-                for i in range(num_ref_tokens):
-                    ref_top1_tokens[response_start_in_tokens + i] = ref_top1_token_strings[i]
+                # Full array aligned with tokens (prompt positions get empty list)
+                ref_topk_tokens = [[] for _ in range(len(tokens))]
+                num_ref_positions = min(len(ref_topk_token_strings), num_valid_response_in_tokens)
+                for i in range(num_ref_positions):
+                    ref_topk_tokens[response_start_in_tokens + i] = ref_topk_token_strings[i]
         
         create_html_visualization(
             tokens=tokens,
@@ -646,7 +649,7 @@ def visualize_teacher_student_batch(
             output_path=output_path,
             prompt_length=valid_prompt_length,
             extra_info=extra_info if extra_info else None,
-            ref_top1_tokens=ref_top1_tokens,
+            ref_topk_tokens=ref_topk_tokens,
         )
         
         output_paths.append(output_path)
