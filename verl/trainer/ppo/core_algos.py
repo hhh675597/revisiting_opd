@@ -873,7 +873,7 @@ def compute_memory_efficient_kl(
     sampled_indices: torch.LongTensor = None,
     log_prob: torch.FloatTensor = None,
     ref_log_prob: torch.FloatTensor = None,
-    norm_to_one_for_kl: bool = False,
+    norm_to_one_for_kl: bool = True,
 ) -> tuple:
     """Memory-efficient KL computation using pre-gathered logits.
 

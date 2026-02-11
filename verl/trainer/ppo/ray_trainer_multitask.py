@@ -1370,9 +1370,9 @@ class RayPPOTrainer:
                             batch = compute_advantage(
                                 batch,
                                 adv_estimator=self.config.algorithm.adv_estimator,
-                                gamma=self.config.algorithm.opd.get("gamma", 0.0),
-                                reward_weight=self.config.algorithm.opd.get("reward_weight", 0.0),
-                                use_opd_topk=self.config.algorithm.opd.get("topk", False),
+                                gamma=self.config.algorithm.get("opd", {}).get("gamma", 0.0),
+                                reward_weight=self.config.algorithm.get("opd", {}).get("reward_weight", 0.0),
+                                use_opd_topk=self.config.algorithm.get("opd", {}).get("topk", False),
                             )
 
                     # update critic

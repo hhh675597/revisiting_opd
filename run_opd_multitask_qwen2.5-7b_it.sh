@@ -41,7 +41,7 @@ python3 -m verl.trainer.main_ppo_multitask \
     algorithm.adv_estimator=placeholder \
     actor_rollout_ref.actor.kl_loss_type=full_reverse \
     +actor_rollout_ref.actor.kl_topk_tokens=32 \
-    +actor_rollout_ref.actor.norm_to_one_for_kl=False \
+    +actor_rollout_ref.actor.norm_to_one_for_kl=True \
     +multitask.enable=True \
     +multitask.batching_mode=sequential \
     +multitask.tasks.task0.name=alfworld \
