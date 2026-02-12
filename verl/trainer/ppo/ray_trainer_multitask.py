@@ -379,9 +379,26 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=0.0, lam=1.0, num_re
     elif adv_estimator == AdvantageEstimator.PLACE_HOLDER:
         # for topk opd, we do not compute advantage at all, but still want to use the same code structure(and reserve for future combination with other adv estimator)
         data.batch["advantages"] = torch.zeros_like(data.batch["token_level_scores"])
-        data.batch["returns"] = torch.zeros_like(data.batch["token_level_scores"])
-        data.batch["token_level_rewards"] = torch.zeros_like(data.batch["token_level_scores"])
 
+        responses = data.batch["responses"]
+        response_length = responses.size(1)
+
+        if multi_turn:
+            loss_mask = data.batch["loss_mask"]
+            response_mask = loss_mask[:, -response_length:]
+        else:
+          attention_mask = data.batch["attention_mask"]
+          response_mask = attention_mask[:, -response_length:]
+    
+        student_log_probs = data.batch["old_log_probs"]
+        teacher_log_probs = data.batch["ref_log_prob"]
+        kl_divergence = core_algos.kl_penalty(student_log_probs, teacher_log_probs, kl_penalty="k1")
+
+        kl_divergence = kl_divergence * response_mask
+        token_level_rewards = -kl_divergence
+        returns = token_level_rewards * response_mask
+        data.batch["token_level_rewards"] = token_level_rewards
+        data.batch["returns"] = returns
     else:
         raise NotImplementedError
     return data

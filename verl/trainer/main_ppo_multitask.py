@@ -140,7 +140,7 @@ class TaskRunner:
         # use reference model
         if config.algorithm.use_kl_in_reward or config.actor_rollout_ref.actor.use_kl_loss:
             # Check if multi-task mode is enabled
-            if hasattr(config, 'multitask') and config.multitask.get('enable', False):
+            if hasattr(config, 'multitask') and config.multitask.get('enable', False) and config.algorithm.adv_estimator == 'opd':
                 print("[main_ppo] Multi-task mode detected, using MultiTaskRefWorker")
                 from verl.workers.multitask_ref_worker import MultiTaskRefWorker
                 role_worker_mapping[Role.RefPolicy] = ray.remote(MultiTaskRefWorker)

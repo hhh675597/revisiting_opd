@@ -13,7 +13,7 @@ export RAY_worker_register_timeout_seconds=600
 
 TIME_STAMP=$(date +"%m%d_%H%M%S")
 project_name='multitask_opd'
-exp_name='multitask_think_lr1e-6_k32_w_k1'
+exp_name='multitask_grpo'
 
 set -x
 ENGINE=${1:-vllm}
@@ -33,24 +33,19 @@ TRAIN_DATA="${MULTITASK_DATA_DIR}/train.parquet"
 VAL_DATA="${MULTITASK_DATA_DIR}/test.parquet"
 
 STUDENT_MODEL="/data/home/zdhs0010/agentic/model/qwen-2.5-7b-it"
-ALFWORLD_TEACHER="/data/home/zdhs0010/agentic/model/alfworld-teacher-gigpo-qwen2.5-7b"
-MATH_TEACHER="/data/home/zdhs0010/agentic/model/OpenThinker3-7B"
 
 
 python3 -m verl.trainer.main_ppo_multitask \
-    algorithm.adv_estimator=opd \
-    actor_rollout_ref.actor.kl_loss_type=full_reverse \
-    +actor_rollout_ref.actor.kl_topk_tokens=32 \
+    algorithm.adv_estimator=grpo \
+    actor_rollout_ref.actor.kl_loss_type=k1 \
+    actor_rollout_ref.ref.model.path=${STUDENT_MODEL} \
     +multitask.enable=True \
     +multitask.batching_mode=sequential \
     +multitask.tasks.task0.name=alfworld \
     +multitask.tasks.task0.env_name=alfworld/AlfredTWEnv \
-    +multitask.tasks.task0.ref_model_path=${ALFWORLD_TEACHER} \
     +multitask.tasks.task0.eval_dataset=eval_in_distribution \
     +multitask.tasks.task1.name=math \
     +multitask.tasks.task1.env_name=math \
-    +multitask.tasks.task1.ref_model_path=${MATH_TEACHER} \
-    actor_rollout_ref.ref.model.path=${MATH_TEACHER} \
     data.train_files=${TRAIN_DATA} \
     data.val_files=${VAL_DATA} \
     data.train_batch_size=${train_data_size} \
@@ -58,7 +53,7 @@ python3 -m verl.trainer.main_ppo_multitask \
     data.max_prompt_length=2048 \
     data.max_response_length=16384 \
     data.filter_overlong_prompts=True \
-    data.truncation='error' \
+    data.truncation='middle' \
     data.return_raw_chat=True \
     +data.batching_mode=sequential \
     actor_rollout_ref.model.path=${STUDENT_MODEL} \
@@ -68,7 +63,7 @@ python3 -m verl.trainer.main_ppo_multitask \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.actor.entropy_coeff=0.0 \
     actor_rollout_ref.actor.use_kl_loss=True \
-    actor_rollout_ref.actor.kl_loss_coef=1 \
+    actor_rollout_ref.actor.kl_loss_coef=1e-3 \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
@@ -98,7 +93,7 @@ python3 -m verl.trainer.main_ppo_multitask \
     trainer.experiment_name="${exp_name}" \
     trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \
-    trainer.save_freq=10 \
+    trainer.save_freq=20 \
     trainer.test_freq=10 \
     trainer.total_epochs=1 \
     trainer.val_before_train=False \
@@ -106,10 +101,10 @@ python3 -m verl.trainer.main_ppo_multitask \
     trainer.default_local_dir="${CKPTS_DIR}" \
     trainer.resume_mode=auto \
     +trainer.visualize_distribution=true \
-    +trainer.visualize_distribution_freq=1 \
-    +trainer.visualize_distribution_samples=2 \
-    +trainer.visualize_distribution_dir="${CKPTS_DIR}/visualizations" \
+    +trainer.visualize_distribution_freq=3 \
+    +trainer.visualize_distribution_samples=1 \
     +trainer.visualize_distribution_ref_tokens=3 \
+    +trainer.visualize_distribution_dir="${CKPTS_DIR}/visualizations" \
     ray_init.num_cpus=96 \
     2>&1 | tee /data/home/zdhs0010/agentic/verl-agent-multi/data/logs/multitask/${exp_name}_${TIME_STAMP}.log
 
