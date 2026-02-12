@@ -13,7 +13,7 @@ export RAY_worker_register_timeout_seconds=600
 
 TIME_STAMP=$(date +"%m%d_%H%M%S")
 project_name='multitask_opd'
-exp_name='math_think_lr1e-6_k32'
+exp_name='math_think_lr5e-6_k32'
 
 set -x
 ENGINE=${1:-vllm}
@@ -28,7 +28,7 @@ train_data_size=16
 val_data_size=128
 group_size=8 
 
-MULTITASK_DATA_DIR="/data/home/zdhs0010/agentic/verl-agent-multi/data/multitask_data_test"
+MULTITASK_DATA_DIR="/data/home/zdhs0010/agentic/verl-agent-multi/data/math"
 TRAIN_DATA="${MULTITASK_DATA_DIR}/train.parquet"
 VAL_DATA="${MULTITASK_DATA_DIR}/test.parquet"
 
@@ -38,18 +38,9 @@ MATH_TEACHER="/data/home/zdhs0010/agentic/model/OpenThinker3-7B"
 
 
 python3 -m verl.trainer.main_ppo_multitask \
-    algorithm.adv_estimator=opd \
+    algorithm.adv_estimator=placeholder \
     actor_rollout_ref.actor.kl_loss_type=full_reverse \
     +actor_rollout_ref.actor.kl_topk_tokens=32 \
-    +multitask.enable=True \
-    +multitask.batching_mode=sequential \
-    +multitask.tasks.task0.name=alfworld \
-    +multitask.tasks.task0.env_name=alfworld/AlfredTWEnv \
-    +multitask.tasks.task0.ref_model_path=${ALFWORLD_TEACHER} \
-    +multitask.tasks.task0.eval_dataset=eval_in_distribution \
-    +multitask.tasks.task1.name=math \
-    +multitask.tasks.task1.env_name=math \
-    +multitask.tasks.task1.ref_model_path=${MATH_TEACHER} \
     actor_rollout_ref.ref.model.path=${MATH_TEACHER} \
     data.train_files=${TRAIN_DATA} \
     data.val_files=${VAL_DATA} \
@@ -58,11 +49,11 @@ python3 -m verl.trainer.main_ppo_multitask \
     data.max_prompt_length=2048 \
     data.max_response_length=16384 \
     data.filter_overlong_prompts=True \
-    data.truncation='error' \
+    data.truncation='middle' \
     data.return_raw_chat=True \
     +data.batching_mode=sequential \
     actor_rollout_ref.model.path=${STUDENT_MODEL} \
-    actor_rollout_ref.actor.optim.lr=1e-6 \
+    actor_rollout_ref.actor.optim.lr=5e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.actor.ppo_mini_batch_size=64 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
@@ -111,5 +102,5 @@ python3 -m verl.trainer.main_ppo_multitask \
     +trainer.visualize_distribution_dir="${CKPTS_DIR}/visualizations" \
     +trainer.visualize_distribution_ref_tokens=3 \
     ray_init.num_cpus=96 \
-    2>&1 | tee /data/home/zdhs0010/agentic/verl-agent-multi/data/logs/multitask/${exp_name}_${TIME_STAMP}.log
+    2>&1 | tee /data/home/zdhs0010/agentic/verl-agent-multi/data/logs/math/${exp_name}_${TIME_STAMP}.log
 
