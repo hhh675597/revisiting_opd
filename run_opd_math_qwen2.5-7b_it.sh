@@ -13,7 +13,7 @@ export RAY_worker_register_timeout_seconds=600
 
 TIME_STAMP=$(date +"%m%d_%H%M%S")
 project_name='multitask_opd'
-exp_name='math_think_lr5e-6_k32'
+exp_name='math_think_lr2e-7_k32'
 
 set -x
 ENGINE=${1:-vllm}
@@ -28,7 +28,7 @@ train_data_size=16
 val_data_size=128
 group_size=8 
 
-MULTITASK_DATA_DIR="/data/home/zdhs0010/agentic/verl-agent-multi/data/math"
+MULTITASK_DATA_DIR="/data/home/zdhs0010/agentic/verl-agent-multi/data/math_opd"
 TRAIN_DATA="${MULTITASK_DATA_DIR}/train.parquet"
 VAL_DATA="${MULTITASK_DATA_DIR}/test.parquet"
 
@@ -53,7 +53,7 @@ python3 -m verl.trainer.main_ppo_multitask \
     data.return_raw_chat=True \
     +data.batching_mode=sequential \
     actor_rollout_ref.model.path=${STUDENT_MODEL} \
-    actor_rollout_ref.actor.optim.lr=5e-6 \
+    actor_rollout_ref.actor.optim.lr=2e-7 \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.actor.ppo_mini_batch_size=64 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
@@ -78,7 +78,7 @@ python3 -m verl.trainer.main_ppo_multitask \
     actor_rollout_ref.actor.use_invalid_action_penalty=False \
     actor_rollout_ref.actor.invalid_action_penalty_coef=0.0 \
     algorithm.use_kl_in_reward=False \
-    env.env_name=multitask \
+    env.env_name=math \
     env.seed=0 \
     env.max_steps=30 \
     env.rollout.n=${group_size} \
@@ -89,7 +89,7 @@ python3 -m verl.trainer.main_ppo_multitask \
     trainer.experiment_name="${exp_name}" \
     trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \
-    trainer.save_freq=10 \
+    trainer.save_freq=30 \
     trainer.test_freq=10 \
     trainer.total_epochs=1 \
     trainer.val_before_train=False \
