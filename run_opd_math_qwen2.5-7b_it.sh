@@ -13,7 +13,7 @@ export RAY_worker_register_timeout_seconds=600
 
 TIME_STAMP=$(date +"%m%d_%H%M%S")
 project_name='multitask_opd'
-exp_name='math_think_lr2e-7_k32'
+exp_name='math_think_lr2e-6_k32_opd_mask_special_tokens'
 
 set -x
 ENGINE=${1:-vllm}
@@ -41,6 +41,8 @@ python3 -m verl.trainer.main_ppo_multitask \
     algorithm.adv_estimator=placeholder \
     actor_rollout_ref.actor.kl_loss_type=full_reverse \
     +actor_rollout_ref.actor.kl_topk_tokens=32 \
+    +actor_rollout_ref.actor.clip_log_ratio=False \
+    +actor_rollout_ref.actor.opd_mask_special_tokens=True \
     actor_rollout_ref.ref.model.path=${MATH_TEACHER} \
     data.train_files=${TRAIN_DATA} \
     data.val_files=${VAL_DATA} \
@@ -53,7 +55,7 @@ python3 -m verl.trainer.main_ppo_multitask \
     data.return_raw_chat=True \
     +data.batching_mode=sequential \
     actor_rollout_ref.model.path=${STUDENT_MODEL} \
-    actor_rollout_ref.actor.optim.lr=2e-7 \
+    actor_rollout_ref.actor.optim.lr=2e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.actor.ppo_mini_batch_size=64 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
@@ -90,7 +92,7 @@ python3 -m verl.trainer.main_ppo_multitask \
     trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \
     trainer.save_freq=30 \
-    trainer.test_freq=10 \
+    trainer.test_freq=30 \
     trainer.total_epochs=1 \
     trainer.val_before_train=False \
     trainer.val_only=False \

@@ -55,11 +55,12 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
 class DataParallelPPOActor(BasePPOActor):
-    def __init__(self, config, actor_module: nn.Module, actor_optimizer: torch.optim.Optimizer = None):
+    def __init__(self, config, actor_module: nn.Module, actor_optimizer: torch.optim.Optimizer = None, tokenizer=None):
         """When optimizer is None, it is Reference Policy"""
         super().__init__(config)
         self.actor_module = actor_module
         self.actor_optimizer = actor_optimizer
+        self.tokenizer = tokenizer
 
         self.use_remove_padding = self.config.get("use_remove_padding", False)
         print(f"Actor use_remove_padding={self.use_remove_padding}")
@@ -75,6 +76,73 @@ class DataParallelPPOActor(BasePPOActor):
             else verl_F.entropy_from_logits
         )
         self.device_name = get_device_name()
+        
+        # OPD special token masking
+        self._opd_first_mask_token_ids = {}  
+        if self.tokenizer is not None and self.config.get("opd_mask_special_tokens", False):
+            self._init_opd_mask_tokens()
+
+    def _init_opd_mask_tokens(self):
+        """Initialize token IDs for OPD special token masking.
+        """
+        if self.tokenizer is None:
+            return
+        
+        # Tokens to mask on first occurrence only
+        # Default: ["<", "think", "<|im_end|>"]
+        opd_first_occurrence_tokens = self.config.get("opd_mask_first_tokens", ["<", "think", "<|im_end|>"])
+        
+        # Get token IDs for each token (first occurrence masking)
+        self._opd_first_mask_token_ids = {}  # token_id -> True (to track first occurrence)
+        for token in opd_first_occurrence_tokens:
+            try:
+                ids = self.tokenizer.encode(token, add_special_tokens=False)
+                # For single-token cases, store the token ID
+                if len(ids) == 1:
+                    self._opd_first_mask_token_ids[ids[0]] = token
+                else:
+                    # For multi-token cases (like <|im_end|> might be), store all IDs
+                    for tid in ids:
+                        self._opd_first_mask_token_ids[tid] = token
+            except Exception:
+                pass  # Token may not exist in vocab
+        
+        if self._opd_first_mask_token_ids:
+            print(f"[OPD Masking] Initialized first-occurrence masking for token_ids: {self._opd_first_mask_token_ids}")
+
+    def _compute_opd_kl_mask(self, responses: torch.Tensor, response_mask: torch.Tensor) -> torch.Tensor:
+        """Compute mask for OPD KL loss, masking special tokens that cause vocab mismatch.
+        
+        Masks the FIRST occurrence of each specified token (e.g., "<", "think", "<|im_end|>").
+        
+        Args:
+            responses: (batch_size, response_length) - token IDs of responses
+            response_mask: (batch_size, response_length) - original response mask
+            
+        Returns:
+            kl_mask: (batch_size, response_length) - mask with special tokens zeroed out
+        """
+        if not self.config.get("opd_mask_special_tokens", False):
+            return response_mask
+        
+        if not self._opd_first_mask_token_ids:
+            return response_mask
+            
+        kl_mask = response_mask.clone()
+        batch_size, response_length = responses.shape
+        
+        # For each token ID that needs first-occurrence masking
+        for token_id in self._opd_first_mask_token_ids.keys():
+            # Find first occurrence in each batch and mask it
+            for b in range(batch_size):
+                # Find positions where this token appears
+                matches = (responses[b] == token_id).nonzero(as_tuple=True)[0]
+                if len(matches) > 0:
+                    # Mask only the first occurrence
+                    first_pos = matches[0].item()
+                    kl_mask[b, first_pos] = 0
+        
+        return kl_mask
 
     def _forward_micro_batch(self, micro_batch, temperature, calculate_entropy=False) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -1253,6 +1321,7 @@ class DataParallelPPOActor(BasePPOActor):
                                     kl_type=kl_loss_type,
                                     use_tail_sampling=use_tail_sampling,
                                     norm_to_one_for_kl=self.config.get("norm_to_one_for_kl", True),
+                                    clip_log_ratio=self.config.get("clip_log_ratio", False),
                                     **tail_kwargs,
                                 )
                                 if use_kl_iw:
@@ -1268,7 +1337,9 @@ class DataParallelPPOActor(BasePPOActor):
                                 kl_penalty=self.config.kl_loss_type,
                             )
 
-                        kl_loss = agg_loss(loss_mat=kld, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+                        # Apply OPD special token masking if enabled
+                        kl_mask = self._compute_opd_kl_mask(responses, response_mask)
+                        kl_loss = agg_loss(loss_mat=kld, loss_mask=kl_mask, loss_agg_mode=loss_agg_mode)
 
                         policy_loss = policy_loss + kl_loss * self.config.kl_loss_coef
                         # metrics["actor/kl_loss"] = kl_loss.detach().item()
