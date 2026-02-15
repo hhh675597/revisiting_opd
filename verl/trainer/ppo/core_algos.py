@@ -874,6 +874,7 @@ def compute_memory_efficient_kl(
     log_prob: torch.FloatTensor = None,
     ref_log_prob: torch.FloatTensor = None,
     norm_to_one_for_kl: bool = True,
+    clip_log_ratio: bool = False,
 ) -> tuple:
     """Memory-efficient KL computation using pre-gathered logits.
 
@@ -919,58 +920,24 @@ def compute_memory_efficient_kl(
         assert log_prob is not None
         assert ref_log_prob is not None
 
-    # Convert to probabilities
-    # print(f"[DBG]: actor_logits_k: min={actor_logits_k.min().item():.4f}, max={actor_logits_k.max().item():.4f}, "
-    #       f"mean={actor_logits_k.mean().item():.4f}, dtype={actor_logits_k.dtype}")
-    # print(f"[DBG]: ref_logits_k: min={ref_logits_k.min().item():.4f}, max={ref_logits_k.max().item():.4f}, "
-    #       f"mean={ref_logits_k.mean().item():.4f}, dtype={ref_logits_k.dtype}")
-    # print(f"[DBG]: actor_logsumexp: min={actor_logsumexp.min().item():.4f}, max={actor_logsumexp.max().item():.4f}")
-    # print(f"[DBG]: ref_logsumexp: min={ref_logsumexp.min().item():.4f}, max={ref_logsumexp.max().item():.4f}")
-
-    # print(f"teacher_probs: has_inf={teacher_probs.isinf().any().item()}, has_nan={teacher_probs.isnan().any().item()}, "
-    #       f"max={teacher_probs.max().item()}")
-    # print(f"student_probs: has_inf={student_probs.isinf().any().item()}, has_nan={student_probs.isnan().any().item()}, "
-    #       f"max={student_probs.max().item()}")
-    
-    # Normalize both distributions over top-k to get proper probability distributions
-    # teacher_probs = torch.exp(ref_logits_k)  # (bs, resp_len, k)
-    # student_probs = torch.exp(actor_logits_k)  # (bs, resp_len, k)
-    # teacher_probs_norm = teacher_probs / (teacher_probs.sum(dim=-1, keepdim=True) + 1e-10)
-    # student_probs_norm = student_probs / (student_probs.sum(dim=-1, keepdim=True) + 1e-10)
-    # teacher_log_probs_norm = torch.log(teacher_probs_norm + 1e-10)
-    # student_log_probs_norm = torch.log(student_probs_norm + 1e-10)
     if norm_to_one_for_kl:
         teacher_log_probs_norm = torch.nn.functional.log_softmax(ref_logits_k, dim=-1)
         student_log_probs_norm = torch.nn.functional.log_softmax(actor_logits_k, dim=-1)
         student_probs_norm = torch.exp(student_log_probs_norm)
-        L1 = (student_probs_norm * (student_log_probs_norm - teacher_log_probs_norm)).sum(dim=-1)
+        if clip_log_ratio:
+            diff = torch.clamp(student_log_probs_norm - teacher_log_probs_norm, min=-5.0, max=5.0)
+            L1 = (student_probs_norm * diff).sum(dim=-1)
+        else:
+            L1 = (student_probs_norm * (student_log_probs_norm - teacher_log_probs_norm)).sum(dim=-1)
     else:
         log_p_k = actor_logits_k - actor_logsumexp.unsqueeze(-1)
         log_q_k = ref_logits_k - ref_logsumexp.unsqueeze(-1)
         p_k = torch.exp(log_p_k)
-        L1 = (p_k * (log_p_k - log_q_k)).sum(dim=-1)
-
-    
-    # KL(student || teacher) = sum_k student_norm(k) * (log student_norm(k) - log teacher_norm(k))
-
-    # print(f"[DEBUG KL] actor_logits_k: device={actor_logits_k.device}, dtype={actor_logits_k.dtype}, "
-    #   f"shape={actor_logits_k.shape}, has_nan={actor_logits_k.isnan().any()}, has_inf={actor_logits_k.isinf().any()}")
-    # print(f"[DEBUG KL] actor_logsumexp: device={actor_logsumexp.device}, dtype={actor_logsumexp.dtype}, "
-    #   f"has_nan={actor_logsumexp.isnan().any()}, has_inf={actor_logsumexp.isinf().any()}")
-    # print(f"[DEBUG KL] ref_logits_k: device={ref_logits_k.device}, dtype={ref_logits_k.dtype}, "
-    #   f"has_nan={ref_logits_k.isnan().any()}, has_inf={ref_logits_k.isinf().any()}")
-    # print(f"[DEBUG KL] ref_logsumexp: device={ref_logsumexp.device}, dtype={ref_logsumexp.dtype}, "
-    #   f"has_nan={ref_logsumexp.isnan().any()}, has_inf={ref_logsumexp.isinf().any()}")
-
-    # device = actor_logits_k.device
-    # dtype = actor_logits_k.dtype
-
-    # actor_logits_k = actor_logits_k.to(device=device, dtype=dtype)
-    # ref_logits_k = ref_logits_k.to(device=device, dtype=dtype)
-    # actor_logsumexp = actor_logsumexp.to(device=device, dtype=dtype)
-    # ref_logsumexp = ref_logsumexp.to(device=device, dtype=dtype)
-
-
+        if clip_log_ratio:
+            diff = torch.clamp(log_p_k - log_q_k, min=-5.0, max=5.0)
+            L1 = (p_k * diff).sum(dim=-1)
+        else:
+            L1 = (p_k * (log_p_k - log_q_k)).sum(dim=-1)
 
     if kl_type == "full_forward":
         raise ValueError("full_forward KL(π_ref || π) is not supported in OPD.")
