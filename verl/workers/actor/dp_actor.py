@@ -130,6 +130,8 @@ class DataParallelPPOActor(BasePPOActor):
             
         kl_mask = response_mask.clone()
         batch_size, response_length = responses.shape
+
+        # total_masked = 0
         
         # For each token ID that needs first-occurrence masking
         for token_id in self._opd_first_mask_token_ids.keys():
@@ -141,7 +143,11 @@ class DataParallelPPOActor(BasePPOActor):
                     # Mask only the first occurrence
                     first_pos = matches[0].item()
                     kl_mask[b, first_pos] = 0
-        
+        #             total_masked += 1
+        #             print(f"[OPD Masking] Masked token {token_id} at position {first_pos} in batch {b}")
+
+        # print(f"[OPD DEBUG] Total tokens masked this batch: {total_masked}")
+        # print(f"[OPD DEBUG] response_mask sum: {response_mask.sum().item()}, kl_mask sum: {kl_mask.sum().item()}")
         return kl_mask
 
     def _forward_micro_batch(self, micro_batch, temperature, calculate_entropy=False) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -1342,7 +1348,7 @@ class DataParallelPPOActor(BasePPOActor):
                         kl_loss = agg_loss(loss_mat=kld, loss_mask=kl_mask, loss_agg_mode=loss_agg_mode)
 
                         policy_loss = policy_loss + kl_loss * self.config.kl_loss_coef
-                        # metrics["actor/kl_loss"] = kl_loss.detach().item()
+                        metrics["actor/kl_loss"] = kl_loss.detach().item()
                         metrics["actor/kl_coef"] = self.config.kl_loss_coef
 
                     if self.config.use_dynamic_bsz:
@@ -1356,7 +1362,7 @@ class DataParallelPPOActor(BasePPOActor):
                     loss.backward()
 
                     data = {
-                        "actor/kl_loss": kl_loss.detach().item(),
+                        # "actor/kl_loss": kl_loss.detach().item(),
                         "actor/policy_loss": policy_loss.detach().item(),
                         "actor/pg_loss": pg_loss.detach().item(),
                         "actor/pg_clipfrac": pg_clipfrac.detach().item(),

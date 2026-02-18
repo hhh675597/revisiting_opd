@@ -13,7 +13,7 @@ export RAY_worker_register_timeout_seconds=600
 
 TIME_STAMP=$(date +"%m%d_%H%M%S")
 project_name='multitask_opd'
-exp_name='math_think_lr2e-6_k32_opd_mask_special_tokens'
+exp_name='math_raw_opd_lr2e-6'
 
 set -x
 ENGINE=${1:-vllm}
@@ -38,7 +38,7 @@ MATH_TEACHER="/data/home/zdhs0010/agentic/model/OpenThinker3-7B"
 
 
 python3 -m verl.trainer.main_ppo_multitask \
-    algorithm.adv_estimator=placeholder \
+    algorithm.adv_estimator=opd \
     actor_rollout_ref.actor.kl_loss_type=full_reverse \
     +actor_rollout_ref.actor.kl_topk_tokens=32 \
     +actor_rollout_ref.actor.clip_log_ratio=False \
@@ -60,7 +60,7 @@ python3 -m verl.trainer.main_ppo_multitask \
     actor_rollout_ref.actor.ppo_mini_batch_size=64 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.actor.entropy_coeff=0.0 \
-    actor_rollout_ref.actor.use_kl_loss=True \
+    actor_rollout_ref.actor.use_kl_loss=False \
     actor_rollout_ref.actor.kl_loss_coef=1 \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.fsdp_config.param_offload=True \
@@ -79,7 +79,7 @@ python3 -m verl.trainer.main_ppo_multitask \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.use_invalid_action_penalty=False \
     actor_rollout_ref.actor.invalid_action_penalty_coef=0.0 \
-    algorithm.use_kl_in_reward=False \
+    algorithm.use_kl_in_reward=True \
     env.env_name=math \
     env.seed=0 \
     env.max_steps=30 \
