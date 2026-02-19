@@ -47,9 +47,11 @@ python3 -m verl.trainer.main_ppo_multitask \
     +multitask.tasks.task0.env_name=alfworld/AlfredTWEnv \
     +multitask.tasks.task0.ref_model_path=${ALFWORLD_TEACHER} \
     +multitask.tasks.task0.eval_dataset=eval_in_distribution \
+    +multitask.tasks.task0.max_response_length=512 \
     +multitask.tasks.task1.name=math \
     +multitask.tasks.task1.env_name=math \
     +multitask.tasks.task1.ref_model_path=${MATH_TEACHER} \
+    +multitask.tasks.task1.max_response_length=16384 \
     data.train_files=${TRAIN_DATA} \
     data.val_files=${VAL_DATA} \
     data.train_batch_size=${train_data_size} \
