@@ -13,7 +13,7 @@ export RAY_worker_register_timeout_seconds=600
 
 TIME_STAMP=$(date +"%m%d_%H%M%S")
 project_name='multitask_opd'
-exp_name='math_original_opd_lr2e-6'
+exp_name='math_original_opd_lr2e-6_clip'
 
 set -x
 ENGINE=${1:-vllm}
@@ -42,7 +42,7 @@ python3 -m verl.trainer.main_ppo_multitask \
     actor_rollout_ref.actor.kl_loss_type=k1 \
     +actor_rollout_ref.actor.kl_topk_tokens=32 \
     +actor_rollout_ref.actor.norm_to_one_for_kl=True \
-    +actor_rollout_ref.actor.clip_log_ratio=False \
+    +actor_rollout_ref.actor.clip_log_ratio=True \
     +actor_rollout_ref.actor.opd_mask_special_tokens=False \
     actor_rollout_ref.rollout.top_p=1 \
     actor_rollout_ref.ref.model.path=${MATH_TEACHER} \

@@ -247,7 +247,7 @@ def compute_response_mask(data: DataProto):
     return attention_mask[:, -response_length:]
 
 
-def compute_advantage(data: DataProto, adv_estimator, gamma=0.0, lam=1.0, num_repeat=1, multi_turn=False, norm_adv_by_std_in_grpo=True, step_advantage_w=1.0, gigpo_mode="mean_std_norm", gigpo_enable_similarity=False, gigpo_similarity_thresh=0.95, reward_weight=0.0, use_opd_topk=False, **kwargs):
+def compute_advantage(data: DataProto, adv_estimator, gamma=0.0, lam=1.0, num_repeat=1, multi_turn=False, norm_adv_by_std_in_grpo=True, step_advantage_w=1.0, gigpo_mode="mean_std_norm", gigpo_enable_similarity=False, gigpo_similarity_thresh=0.95, reward_weight=0.0, use_opd_topk=False, clip_log_ratio=False, **kwargs):
     """Compute advantage estimates for policy optimization.
 
     This function computes advantage estimates using various estimators like GAE, GRPO, REINFORCE++, etc.
@@ -372,6 +372,7 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=0.0, lam=1.0, num_re
             reward_weight=reward_weight, # weight for outcome reward
             multi_turn=multi_turn, # whether multi-turn conversation
             use_topk_kl=use_opd_topk, # whether to use top-k KL divergence (requires teacher_topk_log_probs and student_topk_log_probs)
+            clip_log_ratio=clip_log_ratio,
             )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
@@ -1390,6 +1391,7 @@ class RayPPOTrainer:
                                 gamma=self.config.algorithm.get("opd", {}).get("gamma", 0.0),
                                 reward_weight=self.config.algorithm.get("opd", {}).get("reward_weight", 0.0),
                                 use_opd_topk=self.config.algorithm.get("opd", {}).get("topk", False),
+                                clip_log_ratio=self.config.actor_rollout_ref.actor.get("clip_log_ratio", False), # this config is not that naturally related to OPD, but we keep it here for compatibility
                             )
 
                     # update critic

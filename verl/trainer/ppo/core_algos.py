@@ -760,6 +760,7 @@ def compute_opd_advantage(
         reward_weight: float = 0.0,
         multi_turn: bool = False,
         use_topk_kl: bool = False,
+        clip_log_ratio: bool = False,
 ):
     """Compute advantage as the difference between teacher and student log-probabilities, possibly combined with outcome reward.
 
@@ -769,7 +770,7 @@ def compute_opd_advantage(
         reward_weight: float, weight for outcome reward
         multi_turn: bool, whether the data is multi-turn dialogue data
         use_topk_kl: bool, whether to use top-k KL divergence (requires teacher_topk_log_probs and student_topk_log_probs in batch)
-    
+        clip_log_ratio: bool, whether to clip log ratio for numerical stability
     Returns:
         advantages: `(torch.Tensor)`
             shape: (bs, response_length)
@@ -800,6 +801,8 @@ def compute_opd_advantage(
         student_log_probs = data.batch["old_log_probs"]
         teacher_log_probs = data.batch["ref_log_prob"]
         kl_divergence = kl_penalty(student_log_probs, teacher_log_probs, kl_penalty="kl")
+        if clip_log_ratio:
+            kl_divergence = torch.clamp(kl_divergence, min=-5.0, max=5.0)
     
     kl_divergence = kl_divergence * response_mask
 
