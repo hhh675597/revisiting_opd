@@ -89,8 +89,8 @@ class DataParallelPPOActor(BasePPOActor):
             return
         
         # Tokens to mask on first occurrence only
-        # Default: ["<", "think", "<|im_end|>"]
-        opd_first_occurrence_tokens = self.config.get("opd_mask_first_tokens", ["<", "think", "<|im_end|>"])
+        # Default: ["<", "think"]
+        opd_first_occurrence_tokens = self.config.get("opd_mask_first_tokens", ["<", "think"]) # we directly replace <endoftext> with <|im_end|>
         
         # Get token IDs for each token (first occurrence masking)
         self._opd_first_mask_token_ids = {}  # token_id -> True (to track first occurrence)
@@ -1249,6 +1249,12 @@ class DataParallelPPOActor(BasePPOActor):
                         # Memory-efficient top-k mode: gather actor logits at ref's top-k indices
                         # For OPD: we ALWAYS use ref_topk_indices (teacher determines important tokens)
                         kl_topk_indices = data["ref_topk_indices"]
+
+                        if self.config.get("opd_mask_special_tokens", False):
+                            id_endoftext = self.config.get("id_endoftext", 151643)
+                            id_imend = self.config.get("id_im_end", 151645)
+                            kl_topk_indices = kl_topk_indices.masked_fill(kl_topk_indices == id_endoftext, id_imend)
+
                         entropy, log_prob, actor_kl_inputs = self._forward_micro_batch_with_logits(
                             micro_batch=data, temperature=temperature,
                             kl_topk_indices=kl_topk_indices,
