@@ -500,7 +500,11 @@ class TrajectoryCollector:
 
         total_episode_rewards = np.concatenate(total_episode_rewards, axis=0)
         total_episode_lengths = np.concatenate(total_episode_lengths, axis=0)
-        total_success = {key: np.concatenate([success[key] for success in total_success], axis=0) for key in total_success[0].keys()}
+        all_keys = set().union(*(s.keys() for s in total_success))
+        total_success = {
+            key: np.concatenate([s[key] for s in total_success if key in s], axis=0)
+            for key in all_keys
+        }
         total_traj_uid = np.concatenate(total_traj_uid, axis=0)
         total_tool_callings = np.concatenate(total_tool_callings, axis=0)
 

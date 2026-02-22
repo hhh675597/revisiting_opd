@@ -13,7 +13,7 @@ export RAY_worker_register_timeout_seconds=600
 
 TIME_STAMP=$(date +"%m%d_%H%M%S")
 project_name='multitask_opd'
-exp_name='math_original_opd_lr2e-6_clip'
+exp_name='test_math_success_rate'
 
 set -x
 ENGINE=${1:-vllm}

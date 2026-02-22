@@ -795,6 +795,8 @@ class RayPPOTrainer:
                 non_tensor_batch_keys_to_pop.append("tools_kwargs")
             if "env_kwargs" in test_batch.non_tensor_batch:
                 non_tensor_batch_keys_to_pop.append("env_kwargs")
+            if "task_type" in test_batch.non_tensor_batch:
+                non_tensor_batch_keys_to_pop.append("task_type")
             test_gen_batch = test_batch.pop(
                 batch_keys=batch_keys_to_pop,
                 non_tensor_batch_keys=non_tensor_batch_keys_to_pop,
