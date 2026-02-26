@@ -655,3 +655,66 @@ def visualize_teacher_student_batch(
         output_paths.append(output_path)
     
     return output_paths
+
+def visualize_teacher_student_diff(
+    batch,
+    teacher_log_probs: torch.Tensor,
+    student_log_probs: torch.Tensor,
+    global_step: int,
+    output_dir: str,
+) -> None:
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import os
+    os.makedirs(output_dir, exist_ok=True)
+    
+    response_mask = batch.batch.get('response_mask', None)
+    if response_mask is None:
+        attention_mask = batch.batch.get('attention_mask', None)
+        if attention_mask is not None:
+            response_length = teacher_log_probs.shape[-1]
+            response_mask = attention_mask[:, -response_length:]
+    
+    teacher_probs = torch.exp(teacher_log_probs).detach().cpu().numpy()
+    student_probs = torch.exp(student_log_probs).detach().cpu().numpy()
+    
+    if response_mask is not None:
+        mask = response_mask.detach().cpu().numpy().astype(bool)
+        teacher_probs = teacher_probs[mask]
+        student_probs = student_probs[mask]
+    else:
+        teacher_probs = teacher_probs.flatten()
+        student_probs = student_probs.flatten()
+    
+    valid_mask = np.isfinite(teacher_probs) & np.isfinite(student_probs)
+    teacher_probs = teacher_probs[valid_mask]
+    student_probs = student_probs[valid_mask]
+    
+    if len(teacher_probs) > 1:
+        corr = np.corrcoef(student_probs, teacher_probs)[0, 1]
+        r2 = corr ** 2
+    else:
+        corr = float('nan')
+    
+    fig, ax = plt.subplots(figsize=(8, 8))
+    ax.scatter(student_probs, teacher_probs, alpha=0.3, s=1, color='steelblue')
+    
+    ax.plot([0, 1], [0, 1], 'r--', linewidth=2, label='y=x(Expected)')
+    
+    ax.text(0.05, 0.95, f'R^2 = {r2:.4f}', transform=ax.transAxes,
+            fontsize=12, verticalalignment='top',
+            bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+    
+    ax.set_xlabel("Student Probability", fontweight='bold')
+    ax.set_ylabel("Teacher Probability", fontweight='bold')
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.set_aspect('equal')
+    ax.grid(True, alpha=0.3)
+    # ax.set_title(f"Teacher vs Student Probability", fontsize=14)
+    
+    fig.tight_layout()
+    output_path = os.path.join(output_dir, f"teacher_student_diff_{global_step}.png")
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+    print(f"[Visualization] Saved teacher-student diff (R^2={r2:.4f}) to {output_path}")

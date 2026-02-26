@@ -1335,6 +1335,24 @@ class RayPPOTrainer:
                                     print(f"[Warning] Failed to generate distribution visualization: {e}")
                                     import traceback
                                     traceback.print_exc()
+                        if self.config.trainer.get("visualize_tea_stu_diff", False):
+                            try:
+                                from verl.utils.visualize_distribution import visualize_teacher_student_diff
+                                output_dir = self.config.trainer.get(
+                                    "visualize_distribution_dir",
+                                    f"{self.config.trainer.default_hdfs_dir}/visualizations"
+                                )
+                                visualize_teacher_student_diff(
+                                    batch=batch,
+                                    teacher_log_probs=batch.batch['ref_log_prob'],
+                                    student_log_probs=batch.batch['old_log_probs'],
+                                    global_step=self.global_steps,
+                                    output_dir=output_dir,
+                                )
+                            except Exception as e:
+                                print(f"[Warning] Failed to generate teacher-student difference visualization: {e}")
+                                import traceback
+                                traceback.print_exc()
 
                     # compute values
                     if self.use_critic:
