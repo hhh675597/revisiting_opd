@@ -13,7 +13,7 @@ export RAY_worker_register_timeout_seconds=600
 
 TIME_STAMP=$(date +"%m%d_%H%M%S")
 project_name='multitask_opd'
-exp_name='multitask_k32_topp0.9_mask_lr2e-6_no_replace'
+exp_name='visualize_math_teacher_student_diff_qwen2.5-7b-it'
 
 set -x
 ENGINE=${1:-vllm}
@@ -28,7 +28,7 @@ train_data_size=16
 val_data_size=128
 group_size=8 
 
-MULTITASK_DATA_DIR="/data/home/zdhs0010/agentic/verl-agent-multi/data/multitask_data_test"
+MULTITASK_DATA_DIR="/data/home/zdhs0010/agentic/verl-agent-multi/data/math_opd"
 TRAIN_DATA="${MULTITASK_DATA_DIR}/train.parquet"
 VAL_DATA="${MULTITASK_DATA_DIR}/test_x32.parquet"
 
@@ -43,19 +43,9 @@ python3 -m verl.trainer.main_ppo_multitask \
     +actor_rollout_ref.actor.kl_topk_tokens=32 \
     +actor_rollout_ref.actor.norm_to_one_for_kl=True \
     +actor_rollout_ref.actor.clip_log_ratio=False \
-    +actor_rollout_ref.actor.opd_mask_special_tokens=True \
-    actor_rollout_ref.rollout.top_p=0.9 \
-    +multitask.enable=True \
-    +multitask.batching_mode=sequential \
-    +multitask.tasks.task0.name=alfworld \
-    +multitask.tasks.task0.env_name=alfworld/AlfredTWEnv \
-    +multitask.tasks.task0.ref_model_path=${ALFWORLD_TEACHER} \
-    +multitask.tasks.task0.eval_dataset=eval_in_distribution \
-    +multitask.tasks.task0.max_response_length=512 \
-    +multitask.tasks.task1.name=math \
-    +multitask.tasks.task1.env_name=math \
-    +multitask.tasks.task1.ref_model_path=${MATH_TEACHER} \
-    +multitask.tasks.task1.max_response_length=16384 \
+    +actor_rollout_ref.actor.opd_mask_special_tokens=False \
+    actor_rollout_ref.rollout.top_p=1 \
+    actor_rollout_ref.ref.model.path=${MATH_TEACHER} \
     data.train_files=${TRAIN_DATA} \
     data.val_files=${VAL_DATA} \
     data.train_batch_size=${train_data_size} \
@@ -85,7 +75,7 @@ python3 -m verl.trainer.main_ppo_multitask \
     actor_rollout_ref.rollout.max_num_batched_tokens=$((2048 + 16384)) \
     actor_rollout_ref.rollout.enforce_eager=False \
     actor_rollout_ref.rollout.free_cache_engine=False \
-    actor_rollout_ref.rollout.val_kwargs.temperature=1 \
+    actor_rollout_ref.rollout.val_kwargs.temperature=1.0 \
     actor_rollout_ref.rollout.val_kwargs.top_p=0.9 \
     actor_rollout_ref.rollout.val_kwargs.do_sample=True \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=4 \
@@ -93,7 +83,7 @@ python3 -m verl.trainer.main_ppo_multitask \
     actor_rollout_ref.actor.use_invalid_action_penalty=False \
     actor_rollout_ref.actor.invalid_action_penalty_coef=0.0 \
     algorithm.use_kl_in_reward=False \
-    env.env_name=multitask \
+    env.env_name=math \
     env.seed=0 \
     env.max_steps=30 \
     env.rollout.n=${group_size} \
@@ -104,18 +94,19 @@ python3 -m verl.trainer.main_ppo_multitask \
     trainer.experiment_name="${exp_name}" \
     trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \
-    trainer.save_freq=80 \
-    trainer.test_freq=80 \
+    trainer.save_freq=40 \
+    trainer.test_freq=40 \
     trainer.total_epochs=1 \
     trainer.val_before_train=False \
     trainer.val_only=False \
     trainer.default_local_dir="${CKPTS_DIR}" \
     trainer.resume_mode=auto \
-    +trainer.visualize_distribution=true \
+    +trainer.visualize_distribution=false \
+    +trainer.visualize_tea_stu_diff=true \
     +trainer.visualize_distribution_freq=1 \
-    +trainer.visualize_distribution_samples=1 \
-    +trainer.visualize_distribution_ref_tokens=3 \
+    +trainer.visualize_distribution_samples=2 \
     +trainer.visualize_distribution_dir="${CKPTS_DIR}/visualizations" \
+    +trainer.visualize_distribution_ref_tokens=3 \
     ray_init.num_cpus=96 \
-    2>&1 | tee /data/home/zdhs0010/agentic/verl-agent-multi/data/logs/multitask/${exp_name}_${TIME_STAMP}.log
+    2>&1 | tee /data/home/zdhs0010/agentic/verl-agent-multi/data/logs/math/${exp_name}_${TIME_STAMP}.log
 
