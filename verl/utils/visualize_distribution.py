@@ -666,6 +666,7 @@ def visualize_teacher_student_diff(
     import matplotlib.pyplot as plt
     import numpy as np
     import os
+    import json
     os.makedirs(output_dir, exist_ok=True)
     
     response_mask = batch.batch.get('response_mask', None)
@@ -695,26 +696,70 @@ def visualize_teacher_student_diff(
         r2 = corr ** 2
     else:
         corr = float('nan')
+
+    assert len(teacher_probs) == len(student_probs), f"Teacher and student probabilities have different lengths: {len(teacher_probs)} != {len(student_probs)}"
+    teacher_probs = teacher_probs.tolist()
+    student_probs = student_probs.tolist()
+    token_prob_pairs = {
+        teacher_prob: student_prob for teacher_prob, student_prob in zip(teacher_probs, student_probs)
+    }
+    with open(os.path.join(output_dir, f"teacher_student_diff_{global_step}.json"), 'w') as f:
+        json.dump(token_prob_pairs, f, indent=4)
     
-    fig, ax = plt.subplots(figsize=(8, 8))
-    ax.scatter(student_probs, teacher_probs, alpha=0.3, s=1, color='steelblue')
+    # n_bins = 200
+    # bins = np.linspace(0, 1, n_bins + 1)
+    # bin_centers = (bins[:-1] + bins[1:]) / 2
+    # p2, p98 = [], []
+    # for i in range(n_bins):
+    #     mask = (student_probs >= bins[i]) & (student_probs < bins[i+1])
+    #     if mask.any():
+    #         p2.append(np.percentile(teacher_probs[mask], 2))
+    #         p98.append(np.percentile(teacher_probs[mask], 98))
+    #     else:
+    #         p2.append(float('nan'))
+    #         p98.append(float('nan'))
+    # sorted_idx = np.argsort(student_probs)
+    # student_sorted = student_probs[sorted_idx]
+    # teacher_sorted = teacher_probs[sorted_idx]
+
+    # chunk_size = 500
+    # x_vals = []
+    # p2_vals = []
+    # p98_vals = []
+
+    # for i in range(0, len(student_sorted), chunk_size):
+    #     chunk_t = teacher_sorted[i:i+chunk_size]
+    #     chunk_s = student_sorted[i:i+chunk_size]
+
+    #     x_vals.append(chunk_s.mean())
+    #     p2_vals.append(np.percentile(chunk_t, 2))
+    #     p98_vals.append(np.percentile(chunk_t, 98))
     
-    ax.plot([0, 1], [0, 1], 'r--', linewidth=2, label='y=x(Expected)')
+    # x_vals = np.array(x_vals)
+    # p2_vals = np.array(p2_vals)
+    # p98_vals = np.array(p98_vals)
+
+    # fig, ax = plt.subplots(figsize=(8, 8))
+    # ax.scatter(student_probs, teacher_probs, alpha=0.3, s=1, color='steelblue')
     
-    ax.text(0.05, 0.95, f'R^2 = {r2:.4f}', transform=ax.transAxes,
-            fontsize=12, verticalalignment='top',
-            bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+    # ax.plot([0, 1], [0, 1], color='black', linewidth=2, label='y=x(Expected)')
     
-    ax.set_xlabel("Student Probability", fontweight='bold')
-    ax.set_ylabel("Teacher Probability", fontweight='bold')
-    ax.set_xlim(0, 1)
-    ax.set_ylim(0, 1)
-    ax.set_aspect('equal')
-    ax.grid(True, alpha=0.3)
-    # ax.set_title(f"Teacher vs Student Probability", fontsize=14)
-    
-    fig.tight_layout()
-    output_path = os.path.join(output_dir, f"teacher_student_diff_{global_step}.png")
-    fig.savefig(output_path, dpi=150)
-    plt.close(fig)
-    print(f"[Visualization] Saved teacher-student diff (R^2={r2:.4f}) to {output_path}")
+    # ax.text(0.05, 0.97, f'R^2 = {r2:.4f}', transform=ax.transAxes,
+    #         fontsize=12, verticalalignment='top',
+    #         bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+    # ax.plot(x_vals, p2_vals, color='red', linewidth=2, label='p2')
+    # ax.plot(x_vals, p98_vals, color='purple', linewidth=2, label='p98')
+
+    # ax.set_xlabel("Student Probability", fontweight='bold')
+    # ax.set_ylabel("Teacher Probability", fontweight='bold')
+    # ax.set_xlim(0, 1)
+    # ax.set_ylim(0, 1)
+    # ax.set_aspect('equal')
+    # ax.grid(True, alpha=0.3)
+    # # ax.set_title(f"Teacher vs Student Probability", fontsize=14)
+    # ax.legend(loc='upper left')
+    # # fig.tight_layout()
+    # output_path = os.path.join(output_dir, f"teacher_student_diff_{global_step}.png")
+    # fig.savefig(output_path, dpi=150)
+    # plt.close(fig)
+    # print(f"[Visualization] Saved teacher-student diff (R^2={r2:.4f}) to {output_path}")
