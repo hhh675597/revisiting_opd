@@ -13,7 +13,7 @@ export RAY_worker_register_timeout_seconds=600
 
 TIME_STAMP=$(date +"%m%d_%H%M%S")
 project_name='multitask_opd'
-exp_name='visualize_math_teacher_student_diff_qwen2.5-7b-it'
+exp_name='visualize_math_teacher_student_diff_ori_step40'
 
 set -x
 ENGINE=${1:-vllm}
@@ -32,7 +32,7 @@ MULTITASK_DATA_DIR="/data/home/zdhs0010/agentic/verl-agent-multi/data/math_opd"
 TRAIN_DATA="${MULTITASK_DATA_DIR}/train.parquet"
 VAL_DATA="${MULTITASK_DATA_DIR}/test_x32.parquet"
 
-STUDENT_MODEL="/data/home/zdhs0010/agentic/model/qwen-2.5-7b-it"
+STUDENT_MODEL="/data/home/zdhs0010/agentic/verl-agent-multi/ckpts/math_original_opd_lr2e-6_0219_192951/global_step_40/actor_merged"
 ALFWORLD_TEACHER="/data/home/zdhs0010/agentic/model/alfworld-teacher-gigpo-qwen2.5-7b"
 MATH_TEACHER="/data/home/zdhs0010/agentic/model/OpenThinker3-7B"
 

@@ -41,7 +41,7 @@ python3 -m verl.trainer.main_ppo \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
     data.return_raw_chat=True \
-    actor_rollout_ref.model.path=/data/home/zdhs0010/agentic/model/alfworld-teacher-gigpo-qwen2.5-7b \
+    actor_rollout_ref.model.path=/data/home/zdhs0010/agentic/model/qwen-2.5-7b-it \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.actor.ppo_mini_batch_size=256 \
