@@ -13,7 +13,7 @@ export RAY_worker_register_timeout_seconds=600
 
 TIME_STAMP=$(date +"%m%d_%H%M%S")
 project_name='multitask_opd'
-exp_name='visualize_math_teacher_student_diff_ori_step40'
+exp_name='visualize_math_teacher_student_diff_ours_step200'
 
 set -x
 ENGINE=${1:-vllm}
@@ -28,13 +28,13 @@ train_data_size=16
 val_data_size=128
 group_size=8 
 
-MULTITASK_DATA_DIR="/data/home/zdhs0010/agentic/verl-agent-multi/data/math_opd"
+MULTITASK_DATA_DIR="/data/home/zdhs0086/hhh/verl-agent/data/math_opd"
 TRAIN_DATA="${MULTITASK_DATA_DIR}/train.parquet"
 VAL_DATA="${MULTITASK_DATA_DIR}/test_x32.parquet"
 
-STUDENT_MODEL="/data/home/zdhs0010/agentic/verl-agent-multi/ckpts/math_original_opd_lr2e-6_0219_192951/global_step_40/actor_merged"
-ALFWORLD_TEACHER="/data/home/zdhs0010/agentic/model/alfworld-teacher-gigpo-qwen2.5-7b"
-MATH_TEACHER="/data/home/zdhs0010/agentic/model/OpenThinker3-7B"
+STUDENT_MODEL="/data/home/zdhs0086/hhh/verl-agent/ckpts/math_k32_topp0.9_lr2e-6_pass@32_0219_174837/global_step_200/actor_merged"
+ALFWORLD_TEACHER="/data/home/zdhs0086/hhh/verl-agent/models/alfworld-teacher-gigpo-qwen2.5-7b"
+MATH_TEACHER="/data/home/zdhs0086/hhh/verl-agent/models/OpenThinker3-7B"
 
 
 python3 -m verl.trainer.main_ppo_multitask \
@@ -94,7 +94,7 @@ python3 -m verl.trainer.main_ppo_multitask \
     trainer.experiment_name="${exp_name}" \
     trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \
-    trainer.save_freq=40 \
+    trainer.save_freq=-1 \
     trainer.test_freq=40 \
     trainer.total_epochs=1 \
     trainer.val_before_train=False \
@@ -102,11 +102,11 @@ python3 -m verl.trainer.main_ppo_multitask \
     trainer.default_local_dir="${CKPTS_DIR}" \
     trainer.resume_mode=auto \
     +trainer.visualize_distribution=false \
-    +trainer.visualize_tea_stu_diff=true \
+    +trainer.visualize_tea_stu_diff=false \
     +trainer.visualize_distribution_freq=1 \
     +trainer.visualize_distribution_samples=2 \
     +trainer.visualize_distribution_dir="${CKPTS_DIR}/visualizations" \
     +trainer.visualize_distribution_ref_tokens=3 \
     ray_init.num_cpus=96 \
-    2>&1 | tee /data/home/zdhs0010/agentic/verl-agent-multi/data/logs/math/${exp_name}_${TIME_STAMP}.log
+    2>&1 | tee /data/home/zdhs0086/hhh/verl-agent/data/logs/math/${exp_name}_${TIME_STAMP}.log
 

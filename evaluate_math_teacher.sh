@@ -8,7 +8,7 @@ export RAY_worker_register_timeout_seconds=600
 
 TIME_STAMP=$(date +"%m%d_%H%M%S")
 project_name='expert_math'
-exp_name='eval_math-qwen2.5-7b-it_pass@32'
+exp_name='eval_math_multi_topk_mask_all@1'
 
 set -x
 
@@ -27,8 +27,8 @@ group_size=8
 
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
-    data.train_files=/data/home/zdhs0010/agentic/verl-agent-multi/data/math_opd/test.parquet \
-    data.val_files=/data/home/zdhs0010/agentic/verl-agent-multi/data/math_opd/test_x32.parquet \
+    data.train_files=/data/home/zdhs0086/hhh/verl-agent/data/math_opd/test.parquet \
+    data.val_files=/data/home/zdhs0086/hhh/verl-agent/data/math_opd/test_allat1.parquet \
     data.train_batch_size=$train_data_size \
     data.val_batch_size=$val_data_size \
     data.max_prompt_length=2048 \
@@ -37,7 +37,7 @@ python3 -m verl.trainer.main_ppo \
     data.truncation='error' \
     data.return_raw_chat=True \
     +data.apply_chat_template_kwargs.enable_thinking=False \
-    actor_rollout_ref.model.path=/data/home/zdhs0010/agentic/model/qwen-2.5-7b-it \
+    actor_rollout_ref.model.path=/data/home/zdhs0086/hhh/verl-agent/ckpts/multitask_k32_topp_mask_step400 \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.actor.ppo_mini_batch_size=64 \
@@ -75,4 +75,4 @@ python3 -m verl.trainer.main_ppo \
     trainer.default_local_dir=${CKPTS_DIR} \
     trainer.resume_mode=auto \
     ray_init.num_cpus=96 \
-    2>&1 | tee /data/home/zdhs0010/agentic/verl-agent-multi/data/logs/math/${exp_name}_${TIME_STAMP}.log
+    2>&1 | tee /data/home/zdhs0086/hhh/verl-agent/data/logs/math/${exp_name}_${TIME_STAMP}.log

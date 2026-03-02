@@ -1227,6 +1227,7 @@ class DataParallelPPOActor(BasePPOActor):
                     else:
                         response_mask = attention_mask[:, -response_length:]
 
+                    kl_mask = self._compute_opd_kl_mask(responses, response_mask)
                     old_log_prob = data["old_log_probs"]
                     advantages = data["advantages"]
 
@@ -1281,7 +1282,8 @@ class DataParallelPPOActor(BasePPOActor):
                         old_log_prob=old_log_prob,
                         log_prob=log_prob,
                         advantages=advantages,
-                        response_mask=response_mask,
+                        # response_mask=response_mask,
+                        response_mask=kl_mask,
                         cliprange=clip_ratio,
                         cliprange_low=clip_ratio_low,
                         cliprange_high=clip_ratio_high,
@@ -1350,7 +1352,7 @@ class DataParallelPPOActor(BasePPOActor):
                             )
 
                         # Apply OPD special token masking if enabled
-                        kl_mask = self._compute_opd_kl_mask(responses, response_mask)
+                        # kl_mask = self._compute_opd_kl_mask(responses, response_mask)
                         kl_loss = agg_loss(loss_mat=kld, loss_mask=kl_mask, loss_agg_mode=loss_agg_mode)
 
                         policy_loss = policy_loss + kl_loss * self.config.kl_loss_coef
