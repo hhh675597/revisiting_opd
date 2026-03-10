@@ -70,6 +70,34 @@ from agent_system.multi_turn_rollout import TrajectoryCollector, adjust_batch
 WorkerType = Type[Worker]
 
 
+def _compute_entropy_top_mask(
+    entropys: torch.Tensor,
+    response_mask: torch.Tensor,
+    top_ratio: float,
+) -> torch.Tensor:
+    """Keep only the top-`top_ratio` highest-entropy tokens per sample.
+
+    Args:
+        entropys: (batch_size, response_length) per-token entropy.
+        response_mask: (batch_size, response_length) binary mask for valid tokens.
+        top_ratio: fraction in (0, 1] of valid tokens to keep per sample.
+
+    Returns:
+        entropy_mask: (batch_size, response_length) binary mask, a subset of response_mask.
+    """
+    masked_entropy = entropys * response_mask + (-1e9) * (1 - response_mask)
+
+    num_valid = response_mask.sum(dim=-1)  # (batch_size,)
+    num_keep = torch.clamp((num_valid * top_ratio).long(), min=1)
+
+    sorted_entropy, _ = masked_entropy.sort(dim=-1, descending=True)
+    # threshold: the entropy value at the num_keep-th position per sample
+    thresholds = sorted_entropy.gather(1, (num_keep - 1).unsqueeze(-1)).squeeze(-1)  # (batch_size,)
+
+    entropy_mask = ((entropys >= thresholds.unsqueeze(-1)) & response_mask.bool()).float()
+    return entropy_mask
+
+
 class Role(Enum):
     """
     To create more roles dynamically, you can subclass Role and add new members
@@ -768,6 +796,8 @@ class RayPPOTrainer:
         sample_inputs = []
         sample_outputs = []
         sample_scores = []
+        sample_reward_extra_infos: dict[str, list] = {}
+        sample_data_sources = []
 
         for test_data in self.val_dataloader:
             test_batch = DataProto.from_single_dict(test_data)
@@ -841,8 +871,14 @@ class RayPPOTrainer:
             scores = reward_tensor.sum(-1).cpu().tolist()
             sample_scores.extend(scores)
 
+            batch_extra = result.get("reward_extra_info", {})
+            for k, v in batch_extra.items():
+                sample_reward_extra_infos.setdefault(k, []).extend(v if isinstance(v, list) else list(v))
+            batch_ds = test_batch.non_tensor_batch.get('data_source', ['unknown'] * reward_tensor.shape[0])
+            sample_data_sources.extend(batch_ds if isinstance(batch_ds, list) else list(batch_ds))
+
             reward_tensor_lst.append(reward_tensor)
-            data_source_lst.append(test_batch.non_tensor_batch.get('data_source', ['unknown'] * reward_tensor.shape[0]))
+            data_source_lst.append(batch_ds)
             tool_calling_list.append(test_output_gen_batch.non_tensor_batch['tool_callings'])
             traj_uid_list.append(test_output_gen_batch.non_tensor_batch['traj_uid'])
             # success rate
@@ -856,6 +892,17 @@ class RayPPOTrainer:
                         assert test_batch.non_tensor_batch[k][0] == test_batch.non_tensor_batch[k][i], f'not all success_rate are the same, 0: {test_batch.non_tensor_batch[k][0]}, {i}: {test_batch.non_tensor_batch[k][i]}'
 
         self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
+
+        val_dump_dir = self.config.trainer.get("val_generation_dir", None)
+        extra_with_ds = {**sample_reward_extra_infos, "data_source": sample_data_sources}
+        if val_dump_dir:
+            self._dump_generations(
+                inputs=sample_inputs,
+                outputs=sample_outputs,
+                scores=sample_scores,
+                reward_extra_infos_dict=extra_with_ds,
+                dump_path=val_dump_dir,
+            )
 
         # reward_tensor = torch.cat(reward_tensor_lst, dim=0).sum(-1).cpu()  # (batch_size,) # will lead to a bug if repo_len is not equal in the batch
         reward_tensor = torch.cat([r.sum(-1) for r in reward_tensor_lst], dim=0).cpu()  # (batch_size,)
@@ -1224,6 +1271,19 @@ class RayPPOTrainer:
                         entropy_loss = agg_loss(loss_mat=entropys, loss_mask=response_masks, loss_agg_mode=loss_agg_mode)
                         old_log_prob_metrics = {"actor/entropy_loss": entropy_loss.detach().item()}
                         metrics.update(old_log_prob_metrics)
+
+                        # Entropy top-k masking: only train on the highest-entropy tokens (注意我们按sample实现)
+                        entropy_top_ratio = self.config.actor_rollout_ref.actor.get("entropy_top_ratio", None)
+                        if entropy_top_ratio is not None and entropy_top_ratio < 1.0:
+                            entropy_mask = _compute_entropy_top_mask(entropys, response_masks, entropy_top_ratio)
+                            batch.batch["entropy_mask"] = entropy_mask
+                            kept = entropy_mask.sum().item()
+                            total = response_masks.sum().item()
+                            metrics.update({
+                                "actor/entropy_mask_kept_ratio": kept / max(total, 1.0),
+                                "actor/entropy_mask_kept_tokens": kept,
+                            })
+
                         old_log_prob.batch.pop("entropys")
                         batch = batch.union(old_log_prob)
 

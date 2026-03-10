@@ -13,7 +13,7 @@ export RAY_worker_register_timeout_seconds=600
 
 TIME_STAMP=$(date +"%m%d_%H%M%S")
 project_name='multitask_opd'
-exp_name='math_k32_topp0.8_no_mask'
+exp_name='math_k16_topp0.9_no_mask'
 
 set -x
 ENGINE=${1:-vllm}
@@ -28,23 +28,23 @@ train_data_size=16
 val_data_size=128
 group_size=8 
 
-MULTITASK_DATA_DIR="/data/home/zdhs0086/hhh/verl-agent/data/math_opd"
+MULTITASK_DATA_DIR="/data/home/zdhs0010/agentic/verl-agent-multi/data/math_opd"
 TRAIN_DATA="${MULTITASK_DATA_DIR}/train.parquet"
 VAL_DATA="${MULTITASK_DATA_DIR}/test_x32.parquet"
 
-STUDENT_MODEL="/data/home/zdhs0086/hhh/verl-agent/models/Qwen2.5-7B-Instruct"
-ALFWORLD_TEACHER="/data/home/zdhs0086/hhh/verl-agent/models/alfworld-teacher-gigpo-qwen2.5-7b"
-MATH_TEACHER="/data/home/zdhs0086/hhh/verl-agent/models/OpenThinker3-7B"
+STUDENT_MODEL="/data/home/zdhs0010/agentic/model/qwen-2.5-7b-it"
+ALFWORLD_TEACHER="/data/home/zdhs0010/agentic/model/alfworld-teacher-gigpo-qwen2.5-7b"
+MATH_TEACHER="/data/home/zdhs0010/agentic/model/OpenThinker3-7B"
 
 
 python3 -m verl.trainer.main_ppo_multitask \
     algorithm.adv_estimator=placeholder \
     actor_rollout_ref.actor.kl_loss_type=full_reverse \
-    +actor_rollout_ref.actor.kl_topk_tokens=32 \
+    +actor_rollout_ref.actor.kl_topk_tokens=16 \
     +actor_rollout_ref.actor.norm_to_one_for_kl=True \
     +actor_rollout_ref.actor.clip_log_ratio=False \
     +actor_rollout_ref.actor.opd_mask_special_tokens=False \
-    actor_rollout_ref.rollout.top_p=0.8 \
+    actor_rollout_ref.rollout.top_p=0.9 \
     actor_rollout_ref.ref.model.path=${MATH_TEACHER} \
     data.train_files=${TRAIN_DATA} \
     data.val_files=${VAL_DATA} \
@@ -94,8 +94,8 @@ python3 -m verl.trainer.main_ppo_multitask \
     trainer.experiment_name="${exp_name}" \
     trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \
-    trainer.save_freq=40 \
-    trainer.test_freq=40 \
+    trainer.save_freq=80 \
+    trainer.test_freq=80 \
     trainer.total_epochs=1 \
     trainer.val_before_train=False \
     trainer.val_only=False \
@@ -107,5 +107,5 @@ python3 -m verl.trainer.main_ppo_multitask \
     +trainer.visualize_distribution_dir="${CKPTS_DIR}/visualizations" \
     +trainer.visualize_distribution_ref_tokens=3 \
     ray_init.num_cpus=96 \
-    2>&1 | tee /data/home/zdhs0086/hhh/verl-agent/data/logs/math/${exp_name}_${TIME_STAMP}.log
+    2>&1 | tee /data/home/zdhs0010/agentic/verl-agent-multi/logs/math/${exp_name}_${TIME_STAMP}.log
 

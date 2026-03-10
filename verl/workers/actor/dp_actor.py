@@ -1227,6 +1227,9 @@ class DataParallelPPOActor(BasePPOActor):
                     else:
                         response_mask = attention_mask[:, -response_length:]
 
+                    if "entropy_mask" in data:
+                        response_mask = response_mask * data["entropy_mask"]
+
                     kl_mask = self._compute_opd_kl_mask(responses, response_mask)
                     old_log_prob = data["old_log_probs"]
                     advantages = data["advantages"]
