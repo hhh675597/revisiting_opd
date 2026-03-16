@@ -223,7 +223,7 @@ def main():
     )
     
     # Save combined dataset
-    output_path = os.path.join(args.output_dir, "test.parquet") # be careful
+    output_path = os.path.join(args.output_dir, "test_allat1.parquet") # be careful
     combined_dataset.to_parquet(output_path)
     print(f"\nSaved combined dataset: {output_path}")
     

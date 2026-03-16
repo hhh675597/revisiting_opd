@@ -317,3 +317,142 @@ class MultiTaskRefWorker(Worker):
             ref_policy.actor_module._handle.reshard(True)
         
         return output
+
+    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+    def compute_ref_log_prob_with_topk(self, data: DataProto):
+        """
+        Compute reference log probabilities along with top-k token indices and their log probs.
+        
+        Used for OPD with true KL divergence calculation.
+        topk_k should be passed via data.meta_info["topk_k"]
+        """
+        # Get topk_k from meta_info
+        topk_k = data.meta_info.get("topk_k", 50)
+        
+        # Extract task_type from batch
+        if 'task_type' not in data.non_tensor_batch:
+            raise ValueError("task_type not found in batch. Ensure MultiTaskRLHFDataset is used.")
+        
+        task_types = data.non_tensor_batch['task_type']
+        
+        # Verify all samples are from the same task
+        unique_tasks = set(task_types)
+        if len(unique_tasks) != 1:
+            raise ValueError(
+                f"Mixed task batch detected: {unique_tasks}. "
+                f"MultiTaskRefWorker requires sequential batching (one task per batch)."
+            )
+        
+        task_name = list(unique_tasks)[0]
+        
+        if task_name not in self.task_ref_models:
+            raise ValueError(
+                f"No ref model found for task '{task_name}'. "
+                f"Available tasks: {list(self.task_ref_models.keys())}"
+            )
+        
+        # Route to the appropriate ref model
+        ref_policy = self.task_ref_models[task_name]
+        
+        # Move data to device
+        data = data.to(get_torch_device().current_device())
+        
+        # Configure computation parameters
+        micro_batch_size = self.config.ref.log_prob_micro_batch_size_per_gpu
+        data.meta_info["micro_batch_size"] = micro_batch_size
+        data.meta_info["temperature"] = self.config.rollout.temperature
+        data.meta_info["max_token_len"] = self.config.ref.log_prob_max_token_len_per_gpu
+        data.meta_info["use_dynamic_bsz"] = self.config.ref.log_prob_use_dynamic_bsz
+        
+        # Compute ref log prob with top-k using task-specific model
+        with self.ulysses_sharding_manager:
+            data = self.ulysses_sharding_manager.preprocess_data(data)
+            result = ref_policy.compute_log_prob_with_topk(data=data, topk_k=topk_k)
+            output = DataProto.from_dict(tensors={
+                "ref_log_prob": result["log_probs"],
+                "teacher_topk_indices": result["topk_indices"],
+                "teacher_topk_log_probs": result["topk_log_probs"],
+            })
+            output = self.ulysses_sharding_manager.postprocess_data(output)
+        
+        output = output.to("cpu")
+        
+        # Handle FSDP resharding
+        from verl.utils.fsdp_utils import fsdp_version
+        if self.world_size > 1 and fsdp_version(ref_policy.actor_module) == 1:
+            ref_policy.actor_module._handle.reshard(True)
+        
+        return output
+
+    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+    def compute_ref_log_prob_with_logits(self, data: DataProto):
+        """
+        Compute reference log probabilities and extract logits for memory-efficient KL.
+        
+        Returns ref_log_prob, ref_logits_k, ref_logsumexp, and ref_topk_indices
+        following the ema-pg pattern for compute_memory_efficient_kl.
+        
+        kl_topk_k should be passed via data.meta_info["kl_topk_k"]
+        """
+        # Get kl_topk_k from meta_info: -1 for full logits, >0 for top-k
+        kl_topk_k = data.meta_info.get("kl_topk_k", 50)
+        
+        # Extract task_type from batch
+        if 'task_type' not in data.non_tensor_batch:
+            raise ValueError("task_type not found in batch. Ensure MultiTaskRLHFDataset is used.")
+        
+        task_types = data.non_tensor_batch['task_type']
+        
+        # Verify all samples are from the same task
+        unique_tasks = set(task_types)
+        if len(unique_tasks) != 1:
+            raise ValueError(
+                f"Mixed task batch detected: {unique_tasks}. "
+                f"MultiTaskRefWorker requires sequential batching (one task per batch)."
+            )
+        
+        task_name = list(unique_tasks)[0]
+        
+        if task_name not in self.task_ref_models:
+            raise ValueError(
+                f"No ref model found for task '{task_name}'. "
+                f"Available tasks: {list(self.task_ref_models.keys())}"
+            )
+        
+        # Route to the appropriate ref model
+        ref_policy = self.task_ref_models[task_name]
+        
+        # Move data to device
+        data = data.to(get_torch_device().current_device())
+        
+        # Configure computation parameters
+        micro_batch_size = self.config.ref.log_prob_micro_batch_size_per_gpu
+        data.meta_info["micro_batch_size"] = micro_batch_size
+        data.meta_info["temperature"] = self.config.rollout.temperature
+        data.meta_info["max_token_len"] = self.config.ref.log_prob_max_token_len_per_gpu
+        data.meta_info["use_dynamic_bsz"] = self.config.ref.log_prob_use_dynamic_bsz
+        
+        # Compute ref log prob with logits using task-specific model
+        with self.ulysses_sharding_manager:
+            data = self.ulysses_sharding_manager.preprocess_data(data)
+            ref_log_prob, _, ref_kl_inputs = ref_policy.compute_log_prob_with_logits(
+                data=data, kl_topk_k=kl_topk_k
+            )
+            output_tensors = {
+                "ref_log_prob": ref_log_prob,
+                "ref_logits_k": ref_kl_inputs["logits_k"],
+                "ref_logsumexp": ref_kl_inputs["logsumexp"],
+            }
+            if ref_kl_inputs["topk_indices"] is not None:
+                output_tensors["ref_topk_indices"] = ref_kl_inputs["topk_indices"]
+            output = DataProto.from_dict(tensors=output_tensors)
+            output = self.ulysses_sharding_manager.postprocess_data(output)
+        
+        output = output.to("cpu")
+        
+        # Handle FSDP resharding
+        from verl.utils.fsdp_utils import fsdp_version
+        if self.world_size > 1 and fsdp_version(ref_policy.actor_module) == 1:
+            ref_policy.actor_module._handle.reshard(True)
+        
+        return output

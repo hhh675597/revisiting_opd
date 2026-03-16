@@ -203,6 +203,12 @@ class vLLMRollout(BaseRollout):
 
         do_sample = prompts.meta_info.get("do_sample", True)
         is_validate = prompts.meta_info.get("validate", False)
+        
+        # Support per-task max_tokens override via meta_info
+        max_tokens_override = prompts.meta_info.get("max_tokens", None)
+        if max_tokens_override is not None:
+            kwargs["max_tokens"] = max_tokens_override
+        
         if not do_sample:
             kwargs = {
                 "best_of": 1,
@@ -212,6 +218,8 @@ class vLLMRollout(BaseRollout):
                 "temperature": 0,
                 "n": 1,  # if greedy, only 1 response
             }
+            if max_tokens_override is not None:
+                kwargs["max_tokens"] = max_tokens_override
         elif is_validate:
             # TODO: try **
             kwargs = {
@@ -220,6 +228,8 @@ class vLLMRollout(BaseRollout):
                 "temperature": self.config.val_kwargs.temperature,
                 "n": 1,  # if validate, already repeat in ray_trainer
             }
+            if max_tokens_override is not None:
+                kwargs["max_tokens"] = max_tokens_override
 
         lora_requests = None
         if self.lora_kwargs:
@@ -243,9 +253,11 @@ class vLLMRollout(BaseRollout):
             response = output[0].to(idx.device)
             log_probs = output[1].to(idx.device)
 
-            if response.shape[1] < self.config.response_length:
-                response = pad_sequence_to_length(response, self.config.response_length, self.pad_token_id)
-                log_probs = pad_sequence_to_length(log_probs, self.config.response_length, self.pad_token_id)
+            # Use per-task max_tokens if provided, otherwise use config default
+            target_response_length = max_tokens_override if max_tokens_override is not None else self.config.response_length
+            if response.shape[1] < target_response_length:
+                response = pad_sequence_to_length(response, target_response_length, self.pad_token_id)
+                log_probs = pad_sequence_to_length(log_probs, target_response_length, self.pad_token_id)
 
             # utilize current sampling params
             if self.sampling_params.n > 1 and do_sample:

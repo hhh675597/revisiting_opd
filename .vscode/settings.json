@@ -12,5 +12,9 @@
         "utility": "cpp"
     },
     "iis.configDir": "",
-    "git.ignoreLimitWarning": true
+    "git.ignoreLimitWarning": true,
+    "livePreview.defaultPreviewPath": "/ckpts/test_multitask_lr1e-6_k32_0208_224111/visualizations/step000001_sample0_math.html",
+    "python-envs.defaultEnvManager": "ms-python.python:conda",
+    "python-envs.defaultPackageManager": "ms-python.python:conda",
+    "python-envs.pythonProjects": []
 }

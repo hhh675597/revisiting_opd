@@ -39,6 +39,17 @@ class TrajectoryCollector:
         self.config = config
         self.tokenizer = tokenizer
         self.processor = processor
+        
+        # Build task-specific response length mapping from multitask config
+        self._task_response_lengths = {}
+        if hasattr(config, 'multitask') and config.multitask.get('enable', False):
+            tasks_config = config.multitask.get('tasks', {})
+            for task_key, task_cfg in tasks_config.items():
+                task_name = task_cfg.get('name', task_key)
+                if 'max_response_length' in task_cfg:
+                    self._task_response_lengths[task_name] = task_cfg['max_response_length']
+            if self._task_response_lengths:
+                print(f"[TrajectoryCollector] Per-task response lengths: {self._task_response_lengths}")
 
     def preprocess_single_sample(
         self,
@@ -351,7 +362,17 @@ class TrajectoryCollector:
                 non_tensor_batch_keys=non_tensor_batch_keys_to_pop,
             )
 
-            batch_input.meta_info = gen_batch.meta_info
+            batch_input.meta_info = gen_batch.meta_info.copy() if gen_batch.meta_info else {}
+            
+            # Set per-task response length if configured
+            if self._task_response_lengths and "task_type" in batch_input.non_tensor_batch:
+                task_types = batch_input.non_tensor_batch["task_type"]
+                # For multi-turn rollout, all samples in a batch should have the same task_type
+                # Use the first sample's task_type to determine response length
+                if len(task_types) > 0:
+                    task_type = task_types[0] if isinstance(task_types[0], str) else str(task_types[0])
+                    if task_type in self._task_response_lengths:
+                        batch_input.meta_info["max_tokens"] = self._task_response_lengths[task_type]
 
             # pad to be divisible by dp_size
             batch_input_padded, pad_size = pad_dataproto_to_divisor(batch_input, actor_rollout_wg.world_size)
@@ -479,7 +500,11 @@ class TrajectoryCollector:
 
         total_episode_rewards = np.concatenate(total_episode_rewards, axis=0)
         total_episode_lengths = np.concatenate(total_episode_lengths, axis=0)
-        total_success = {key: np.concatenate([success[key] for success in total_success], axis=0) for key in total_success[0].keys()}
+        all_keys = set().union(*(s.keys() for s in total_success))
+        total_success = {
+            key: np.concatenate([s[key] for s in total_success if key in s], axis=0)
+            for key in all_keys
+        }
         total_traj_uid = np.concatenate(total_traj_uid, axis=0)
         total_tool_callings = np.concatenate(total_tool_callings, axis=0)
 

@@ -70,6 +70,34 @@ from agent_system.multi_turn_rollout import TrajectoryCollector, adjust_batch
 WorkerType = Type[Worker]
 
 
+def _compute_entropy_top_mask(
+    entropys: torch.Tensor,
+    response_mask: torch.Tensor,
+    top_ratio: float,
+) -> torch.Tensor:
+    """Keep only the top-`top_ratio` highest-entropy tokens per sample.
+
+    Args:
+        entropys: (batch_size, response_length) per-token entropy.
+        response_mask: (batch_size, response_length) binary mask for valid tokens.
+        top_ratio: fraction in (0, 1] of valid tokens to keep per sample.
+
+    Returns:
+        entropy_mask: (batch_size, response_length) binary mask, a subset of response_mask.
+    """
+    masked_entropy = entropys * response_mask + (-1e9) * (1 - response_mask)
+
+    num_valid = response_mask.sum(dim=-1)  # (batch_size,)
+    num_keep = torch.clamp((num_valid * top_ratio).long(), min=1)
+
+    sorted_entropy, _ = masked_entropy.sort(dim=-1, descending=True)
+    # threshold: the entropy value at the num_keep-th position per sample
+    thresholds = sorted_entropy.gather(1, (num_keep - 1).unsqueeze(-1)).squeeze(-1)  # (batch_size,)
+
+    entropy_mask = ((entropys >= thresholds.unsqueeze(-1)) & response_mask.bool()).float()
+    return entropy_mask
+
+
 class Role(Enum):
     """
     To create more roles dynamically, you can subclass Role and add new members
@@ -98,6 +126,8 @@ class AdvantageEstimator(str, Enum):
     GRPO_PASSK = "grpo_passk"
     GiGPO = 'gigpo'
     OPD = "opd" # add on-policy distillation
+    PLACE_HOLDER = "placeholder"  # for topk opd, where we do not compute advantage at all, 
+    # but still want to use the same code structure(and reserve for future combination with other adv estimator)
 
 
 @dataclass
@@ -245,7 +275,7 @@ def compute_response_mask(data: DataProto):
     return attention_mask[:, -response_length:]
 
 
-def compute_advantage(data: DataProto, adv_estimator, gamma=0.0, lam=1.0, num_repeat=1, multi_turn=False, norm_adv_by_std_in_grpo=True, step_advantage_w=1.0, gigpo_mode="mean_std_norm", gigpo_enable_similarity=False, gigpo_similarity_thresh=0.95, reward_weight=0.0, **kwargs):
+def compute_advantage(data: DataProto, adv_estimator, gamma=0.0, lam=1.0, num_repeat=1, multi_turn=False, norm_adv_by_std_in_grpo=True, step_advantage_w=1.0, gigpo_mode="mean_std_norm", gigpo_enable_similarity=False, gigpo_similarity_thresh=0.95, reward_weight=0.0, use_opd_topk=False, clip_log_ratio=False, **kwargs):
     """Compute advantage estimates for policy optimization.
 
     This function computes advantage estimates using various estimators like GAE, GRPO, REINFORCE++, etc.
@@ -369,8 +399,34 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=0.0, lam=1.0, num_re
             gamma=gamma, # discount factor for future rewards, used in seq-level opd(set to 0.0 for tok-level typical opd)
             reward_weight=reward_weight, # weight for outcome reward
             multi_turn=multi_turn, # whether multi-turn conversation
+            use_topk_kl=use_opd_topk, # whether to use top-k KL divergence (requires teacher_topk_log_probs and student_topk_log_probs)
+            clip_log_ratio=clip_log_ratio,
             )
         data.batch["advantages"] = advantages
+        data.batch["returns"] = returns
+
+    elif adv_estimator == AdvantageEstimator.PLACE_HOLDER:
+        # for topk opd, we do not compute advantage at all, but still want to use the same code structure(and reserve for future combination with other adv estimator)
+        data.batch["advantages"] = torch.zeros_like(data.batch["token_level_scores"])
+
+        responses = data.batch["responses"]
+        response_length = responses.size(1)
+
+        if multi_turn:
+            loss_mask = data.batch["loss_mask"]
+            response_mask = loss_mask[:, -response_length:]
+        else:
+          attention_mask = data.batch["attention_mask"]
+          response_mask = attention_mask[:, -response_length:]
+    
+        student_log_probs = data.batch["old_log_probs"]
+        teacher_log_probs = data.batch["ref_log_prob"]
+        kl_divergence = core_algos.kl_penalty(student_log_probs, teacher_log_probs, kl_penalty="k1")
+
+        kl_divergence = kl_divergence * response_mask
+        token_level_rewards = -kl_divergence
+        returns = token_level_rewards * response_mask
+        data.batch["token_level_rewards"] = token_level_rewards
         data.batch["returns"] = returns
     else:
         raise NotImplementedError
@@ -468,6 +524,7 @@ class RayPPOTrainer:
             AdvantageEstimator.REINFORCE_PLUS_PLUS_BASELINE,
             AdvantageEstimator.GiGPO,
             AdvantageEstimator.OPD,
+            AdvantageEstimator.PLACE_HOLDER,
         ]:
             self.use_critic = False
         else:
@@ -739,6 +796,8 @@ class RayPPOTrainer:
         sample_inputs = []
         sample_outputs = []
         sample_scores = []
+        sample_reward_extra_infos: dict[str, list] = {}
+        sample_data_sources = []
 
         for test_data in self.val_dataloader:
             test_batch = DataProto.from_single_dict(test_data)
@@ -766,6 +825,8 @@ class RayPPOTrainer:
                 non_tensor_batch_keys_to_pop.append("tools_kwargs")
             if "env_kwargs" in test_batch.non_tensor_batch:
                 non_tensor_batch_keys_to_pop.append("env_kwargs")
+            if "task_type" in test_batch.non_tensor_batch:
+                non_tensor_batch_keys_to_pop.append("task_type")
             test_gen_batch = test_batch.pop(
                 batch_keys=batch_keys_to_pop,
                 non_tensor_batch_keys=non_tensor_batch_keys_to_pop,
@@ -810,8 +871,14 @@ class RayPPOTrainer:
             scores = reward_tensor.sum(-1).cpu().tolist()
             sample_scores.extend(scores)
 
+            batch_extra = result.get("reward_extra_info", {})
+            for k, v in batch_extra.items():
+                sample_reward_extra_infos.setdefault(k, []).extend(v if isinstance(v, list) else list(v))
+            batch_ds = test_batch.non_tensor_batch.get('data_source', ['unknown'] * reward_tensor.shape[0])
+            sample_data_sources.extend(batch_ds if isinstance(batch_ds, list) else list(batch_ds))
+
             reward_tensor_lst.append(reward_tensor)
-            data_source_lst.append(test_batch.non_tensor_batch.get('data_source', ['unknown'] * reward_tensor.shape[0]))
+            data_source_lst.append(batch_ds)
             tool_calling_list.append(test_output_gen_batch.non_tensor_batch['tool_callings'])
             traj_uid_list.append(test_output_gen_batch.non_tensor_batch['traj_uid'])
             # success rate
@@ -826,7 +893,19 @@ class RayPPOTrainer:
 
         self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
 
-        reward_tensor = torch.cat(reward_tensor_lst, dim=0).sum(-1).cpu()  # (batch_size,)
+        val_dump_dir = self.config.trainer.get("val_generation_dir", None)
+        extra_with_ds = {**sample_reward_extra_infos, "data_source": sample_data_sources}
+        if val_dump_dir:
+            self._dump_generations(
+                inputs=sample_inputs,
+                outputs=sample_outputs,
+                scores=sample_scores,
+                reward_extra_infos_dict=extra_with_ds,
+                dump_path=val_dump_dir,
+            )
+
+        # reward_tensor = torch.cat(reward_tensor_lst, dim=0).sum(-1).cpu()  # (batch_size,) # will lead to a bug if repo_len is not equal in the batch
+        reward_tensor = torch.cat([r.sum(-1) for r in reward_tensor_lst], dim=0).cpu()  # (batch_size,)
         data_sources = np.concatenate(data_source_lst, axis=0)
         tool_callings = np.concatenate(tool_calling_list, axis=0)
         traj_uids = np.concatenate(traj_uid_list, axis=0)
@@ -1192,6 +1271,19 @@ class RayPPOTrainer:
                         entropy_loss = agg_loss(loss_mat=entropys, loss_mask=response_masks, loss_agg_mode=loss_agg_mode)
                         old_log_prob_metrics = {"actor/entropy_loss": entropy_loss.detach().item()}
                         metrics.update(old_log_prob_metrics)
+
+                        # Entropy top-k masking: only train on the highest-entropy tokens (注意我们按sample实现)
+                        entropy_top_ratio = self.config.actor_rollout_ref.actor.get("entropy_top_ratio", None)
+                        if entropy_top_ratio is not None and entropy_top_ratio < 1.0:
+                            entropy_mask = _compute_entropy_top_mask(entropys, response_masks, entropy_top_ratio)
+                            batch.batch["entropy_mask"] = entropy_mask
+                            kept = entropy_mask.sum().item()
+                            total = response_masks.sum().item()
+                            metrics.update({
+                                "actor/entropy_mask_kept_ratio": kept / max(total, 1.0),
+                                "actor/entropy_mask_kept_tokens": kept,
+                            })
+
                         old_log_prob.batch.pop("entropys")
                         batch = batch.union(old_log_prob)
 
@@ -1220,13 +1312,56 @@ class RayPPOTrainer:
                             )
 
                     if self.use_reference_policy:
+                        # Check if using OPD with top-k KL divergence
+                        use_opd_topk = (
+                            self.config.algorithm.adv_estimator == AdvantageEstimator.OPD and
+                            self.config.algorithm.get("opd", {}).get("topk", False)
+                        )
+                        opd_k = self.config.algorithm.get("opd", {}).get("k", 50)
+                        # These two will never happen at the same time
+                        kl_loss_type = self.config.actor_rollout_ref.actor.kl_loss_type
+                        kl_topk_k = self.config.actor_rollout_ref.actor.get('kl_topk_tokens', None)
+                        use_full_kl = kl_loss_type in ("full_forward", "full_reverse")
+                        
+                        if use_opd_topk is True and kl_topk_k is not None:
+                            raise ValueError("algorithm.opd.topk and actor_rollout_ref.actor.kl_topk_tokens cannot be set together.")
+
                         # compute reference log_prob
                         with _timer("ref", timing_raw):
-                            if not self.ref_in_actor:
-                                ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
-                            else:
-                                ref_log_prob = self.actor_rollout_wg.compute_ref_log_prob(batch)
+                            if use_full_kl:
+                                if kl_loss_type == "full_reverse":
+                                    # We need ref's topk indices to compute KL divergence
+                                    batch.meta_info["kl_topk_k"] = kl_topk_k
+                                    if not self.ref_in_actor:
+                                        ref_log_prob = self.ref_policy_wg.compute_ref_log_prob_with_logits(batch)
+                                    else:
+                                        ref_log_prob = self.actor_rollout_wg.compute_ref_log_prob_with_logits(batch)
+                                else:
+                                    raise ValueError(f"Unsupported KL loss type: {kl_loss_type}. We only consider full_reverse KL loss type for now.")
+
+                            else: # fall into original implementation (use_opd_topk: topk KLD as advantage)
+                                if use_opd_topk:
+                                    # Compute ref log prob with top-k for true KL divergence
+                                    # Pass topk_k via meta_info (DP_COMPUTE_PROTO only accepts DataProto args)
+                                    batch.meta_info["topk_k"] = opd_k
+                                    if not self.ref_in_actor:
+                                        ref_log_prob = self.ref_policy_wg.compute_ref_log_prob_with_topk(batch)
+                                    else:
+                                        ref_log_prob = self.actor_rollout_wg.compute_ref_log_prob_with_topk(batch)
+                                else:
+                                    if not self.ref_in_actor:
+                                        ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
+                                    else:
+                                        ref_log_prob = self.actor_rollout_wg.compute_ref_log_prob(batch)
                             batch = batch.union(ref_log_prob)
+                        
+                        # Compute student's log probs for teacher's top-k indices if using OPD topk
+                        if use_opd_topk and "teacher_topk_indices" in batch.batch:
+                            with _timer("student_topk", timing_raw):
+                                # Pass topk_indices via batch tensor (will be split by dispatcher)
+                                # The indices are already in batch.batch from ref_log_prob union
+                                student_topk_output = self.actor_rollout_wg.compute_log_prob_for_topk_indices(batch)
+                                batch.batch["student_topk_log_probs"] = student_topk_output.batch["student_topk_log_probs"]
                         
                         # Visualize teacher vs student distributions
                         if self.config.trainer.get("visualize_distribution", False):
@@ -1254,11 +1389,30 @@ class RayPPOTrainer:
                                         output_dir=output_dir,
                                         num_samples=self.config.trainer.get("visualize_distribution_samples", 2),
                                         task_type=task_type,
+                                        num_tokens=self.config.trainer.get("visualize_distribution_ref_tokens", 1),
                                     )
                                 except Exception as e:
                                     print(f"[Warning] Failed to generate distribution visualization: {e}")
                                     import traceback
                                     traceback.print_exc()
+                        if self.config.trainer.get("visualize_tea_stu_diff", False):
+                            try:
+                                from verl.utils.visualize_distribution import visualize_teacher_student_diff
+                                output_dir = self.config.trainer.get(
+                                    "visualize_distribution_dir",
+                                    f"{self.config.trainer.default_hdfs_dir}/visualizations"
+                                )
+                                visualize_teacher_student_diff(
+                                    batch=batch,
+                                    teacher_log_probs=batch.batch['ref_log_prob'],
+                                    student_log_probs=batch.batch['old_log_probs'],
+                                    global_step=self.global_steps,
+                                    output_dir=output_dir,
+                                )
+                            except Exception as e:
+                                print(f"[Warning] Failed to generate teacher-student difference visualization: {e}")
+                                import traceback
+                                traceback.print_exc()
 
                     # compute values
                     if self.use_critic:
@@ -1315,8 +1469,10 @@ class RayPPOTrainer:
                             batch = compute_advantage(
                                 batch,
                                 adv_estimator=self.config.algorithm.adv_estimator,
-                                gamma=self.config.algorithm.opd.get("gamma", 0.0),
-                                reward_weight=self.config.algorithm.opd.get("reward_weight", 0.0), # maybe add more args later
+                                gamma=self.config.algorithm.get("opd", {}).get("gamma", 0.0),
+                                reward_weight=self.config.algorithm.get("opd", {}).get("reward_weight", 0.0),
+                                use_opd_topk=self.config.algorithm.get("opd", {}).get("topk", False),
+                                clip_log_ratio=self.config.actor_rollout_ref.actor.get("clip_log_ratio", False), # this config is not that naturally related to OPD, but we keep it here for compatibility
                             )
 
                     # update critic

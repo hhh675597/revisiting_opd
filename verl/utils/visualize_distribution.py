@@ -80,6 +80,7 @@ def create_html_visualization(
     output_path: Path,
     prompt_length: Optional[int] = None,
     extra_info: Optional[Dict] = None,
+    ref_topk_tokens: Optional[List[List[str]]] = None,
 ) -> None:
     """
     Create an interactive HTML visualization of teacher vs student distributions.
@@ -94,6 +95,8 @@ def create_html_visualization(
         output_path: Path to save HTML file
         prompt_length: Length of prompt (to distinguish from response)
         extra_info: Additional information to display (e.g., rewards, episode info)
+        ref_topk_tokens: Reference model's top-k tokens at each position (optional).
+            ref_topk_tokens[i] is a list of token strings (rank 1, 2, ..., k).
     """
     # Convert to numpy for easier manipulation
     teacher_log_probs = np.array(teacher_log_probs)
@@ -119,7 +122,7 @@ def create_html_visualization(
     # Build token data for JavaScript
     token_data = []
     for i, token in enumerate(tokens):
-        token_data.append({
+        token_info = {
             "token": token,
             "teacher_log_prob": float(teacher_log_probs[i]),
             "student_log_prob": float(student_log_probs[i]),
@@ -129,7 +132,13 @@ def create_html_visualization(
             "abs_prob_diff": float(abs_prob_diff[i]),
             "color": token_to_color(signed_prob_diff[i], max_abs_diff),
             "is_prompt": i < prompt_length if prompt_length else False,
-        })
+        }
+        
+        # Add reference model's top-k tokens if available
+        if ref_topk_tokens is not None and i < len(ref_topk_tokens) and ref_topk_tokens[i]:
+            token_info["ref_topk_tokens"] = ref_topk_tokens[i]
+        
+        token_data.append(token_info)
     
     # Compute summary statistics (only for response tokens)
     if prompt_length and prompt_length < len(signed_prob_diff):
@@ -258,7 +267,7 @@ def create_html_visualization(
             background-color: #ecf0f1 !important;
         }}
         .tooltip {{
-            position: fixed;
+            position: absolute; /* Changed from fixed to absolute */
             background-color: rgba(0, 0, 0, 0.9);
             color: white;
             padding: 12px;
@@ -396,9 +405,16 @@ def create_html_visualization(
                     '(Policy &gt; Reference )' : 
                     (data.student_prob < data.teacher_prob ? '(Policy &lt; Reference )' : '(Equal)');
                 
+                const refTopkHtml = data.ref_topk_tokens !== undefined && data.ref_topk_tokens.length > 0 ?
+                    `<div class="tooltip-row" style="background-color: rgba(155, 89, 182, 0.1); padding: 4px; border-radius: 3px; margin: 4px 0;">
+                        <span class="tooltip-label">Ref Top-${{data.ref_topk_tokens.length}} Tokens:</span>
+                        ${{data.ref_topk_tokens.map((t, r) => `<span style="display: block; font-family: 'Courier New', monospace; margin: 2px 0;">${{r + 1}}. "${{t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')}}"</span>`).join('')}}
+                    </div>` : '';
+                
                 tooltip.innerHTML = `
                     <div class="tooltip-row"><span class="tooltip-label">Token:</span> "${{data.token}}"</div>
                     <div class="tooltip-row"><span class="tooltip-label">Position:</span> ${{idx}} ${{data.is_prompt ? '(Prompt)' : '(Response)'}}</div>
+                    ${{refTopkHtml}}
                     <hr style="margin: 8px 0; border: none; border-top: 1px solid #555;">
                     <div class="tooltip-row">
                         <span class="tooltip-label">Reference (Teacher):</span> ${{(data.teacher_prob * 100).toFixed(2)}}%
@@ -478,6 +494,7 @@ def visualize_teacher_student_batch(
     output_dir: str,
     num_samples: int = 2,
     task_type: Optional[str] = None,
+    num_tokens: int = 1,
 ) -> List[Path]:
     """
     Visualize teacher vs student distributions for selected samples in a batch.
@@ -491,6 +508,7 @@ def visualize_teacher_student_batch(
         output_dir: Directory to save HTML files
         num_samples: Number of samples to visualize (default: 2)
         task_type: Task type for this batch (optional, extracted from batch if None)
+        num_tokens: Number of ref top-k tokens to show per position (default: 1)
     
     Returns:
         List of paths to generated HTML files
@@ -600,6 +618,27 @@ def visualize_teacher_student_batch(
             full_teacher_lp[response_start_in_tokens:response_start_in_tokens + num_to_copy] = teacher_lp[:num_to_copy]
             full_student_lp[response_start_in_tokens:response_start_in_tokens + num_to_copy] = student_lp[:num_to_copy]
         
+        # Extract and decode ref_topk_indices (top num_tokens at each position)
+        ref_topk_tokens = None
+        if 'ref_topk_indices' in batch.batch:
+            ref_topk_indices = batch.batch['ref_topk_indices'][sample_idx]  # Shape: (response_length, k)
+            
+            if ref_topk_indices.dim() >= 2 and ref_topk_indices.size(1) > 0:
+                k = min(num_tokens, ref_topk_indices.size(1))
+                # ref_topk_indices[:, :k] -> (response_length, k)
+                indices_per_pos = ref_topk_indices[:, :k].cpu().tolist()
+                
+                # Decode: for each position, list of k token strings
+                ref_topk_token_strings = []
+                for pos_indices in indices_per_pos:
+                    ref_topk_token_strings.append([tokenizer.decode([tid]) for tid in pos_indices])
+                
+                # Full array aligned with tokens (prompt positions get empty list)
+                ref_topk_tokens = [[] for _ in range(len(tokens))]
+                num_ref_positions = min(len(ref_topk_token_strings), num_valid_response_in_tokens)
+                for i in range(num_ref_positions):
+                    ref_topk_tokens[response_start_in_tokens + i] = ref_topk_token_strings[i]
+        
         create_html_visualization(
             tokens=tokens,
             teacher_log_probs=full_teacher_lp.tolist(),
@@ -610,8 +649,117 @@ def visualize_teacher_student_batch(
             output_path=output_path,
             prompt_length=valid_prompt_length,
             extra_info=extra_info if extra_info else None,
+            ref_topk_tokens=ref_topk_tokens,
         )
         
         output_paths.append(output_path)
     
     return output_paths
+
+def visualize_teacher_student_diff(
+    batch,
+    teacher_log_probs: torch.Tensor,
+    student_log_probs: torch.Tensor,
+    global_step: int,
+    output_dir: str,
+) -> None:
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import os
+    import json
+    os.makedirs(output_dir, exist_ok=True)
+    
+    response_mask = batch.batch.get('response_mask', None)
+    if response_mask is None:
+        attention_mask = batch.batch.get('attention_mask', None)
+        if attention_mask is not None:
+            response_length = teacher_log_probs.shape[-1]
+            response_mask = attention_mask[:, -response_length:]
+    
+    teacher_probs = torch.exp(teacher_log_probs).detach().cpu().numpy()
+    student_probs = torch.exp(student_log_probs).detach().cpu().numpy()
+    
+    if response_mask is not None:
+        mask = response_mask.detach().cpu().numpy().astype(bool)
+        teacher_probs = teacher_probs[mask]
+        student_probs = student_probs[mask]
+    else:
+        teacher_probs = teacher_probs.flatten()
+        student_probs = student_probs.flatten()
+    
+    valid_mask = np.isfinite(teacher_probs) & np.isfinite(student_probs)
+    teacher_probs = teacher_probs[valid_mask]
+    student_probs = student_probs[valid_mask]
+    
+    if len(teacher_probs) > 1:
+        corr = np.corrcoef(student_probs, teacher_probs)[0, 1]
+        r2 = corr ** 2
+    else:
+        corr = float('nan')
+
+    assert len(teacher_probs) == len(student_probs), f"Teacher and student probabilities have different lengths: {len(teacher_probs)} != {len(student_probs)}"
+    teacher_probs = teacher_probs.tolist()
+    student_probs = student_probs.tolist()
+    token_prob_pairs = {
+        teacher_prob: student_prob for teacher_prob, student_prob in zip(teacher_probs, student_probs)
+    }
+    with open(os.path.join(output_dir, f"teacher_student_diff_{global_step}.json"), 'w') as f:
+        json.dump(token_prob_pairs, f, indent=4)
+    
+    # n_bins = 200
+    # bins = np.linspace(0, 1, n_bins + 1)
+    # bin_centers = (bins[:-1] + bins[1:]) / 2
+    # p2, p98 = [], []
+    # for i in range(n_bins):
+    #     mask = (student_probs >= bins[i]) & (student_probs < bins[i+1])
+    #     if mask.any():
+    #         p2.append(np.percentile(teacher_probs[mask], 2))
+    #         p98.append(np.percentile(teacher_probs[mask], 98))
+    #     else:
+    #         p2.append(float('nan'))
+    #         p98.append(float('nan'))
+    # sorted_idx = np.argsort(student_probs)
+    # student_sorted = student_probs[sorted_idx]
+    # teacher_sorted = teacher_probs[sorted_idx]
+
+    # chunk_size = 500
+    # x_vals = []
+    # p2_vals = []
+    # p98_vals = []
+
+    # for i in range(0, len(student_sorted), chunk_size):
+    #     chunk_t = teacher_sorted[i:i+chunk_size]
+    #     chunk_s = student_sorted[i:i+chunk_size]
+
+    #     x_vals.append(chunk_s.mean())
+    #     p2_vals.append(np.percentile(chunk_t, 2))
+    #     p98_vals.append(np.percentile(chunk_t, 98))
+    
+    # x_vals = np.array(x_vals)
+    # p2_vals = np.array(p2_vals)
+    # p98_vals = np.array(p98_vals)
+
+    # fig, ax = plt.subplots(figsize=(8, 8))
+    # ax.scatter(student_probs, teacher_probs, alpha=0.3, s=1, color='steelblue')
+    
+    # ax.plot([0, 1], [0, 1], color='black', linewidth=2, label='y=x(Expected)')
+    
+    # ax.text(0.05, 0.97, f'R^2 = {r2:.4f}', transform=ax.transAxes,
+    #         fontsize=12, verticalalignment='top',
+    #         bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+    # ax.plot(x_vals, p2_vals, color='red', linewidth=2, label='p2')
+    # ax.plot(x_vals, p98_vals, color='purple', linewidth=2, label='p98')
+
+    # ax.set_xlabel("Student Probability", fontweight='bold')
+    # ax.set_ylabel("Teacher Probability", fontweight='bold')
+    # ax.set_xlim(0, 1)
+    # ax.set_ylim(0, 1)
+    # ax.set_aspect('equal')
+    # ax.grid(True, alpha=0.3)
+    # # ax.set_title(f"Teacher vs Student Probability", fontsize=14)
+    # ax.legend(loc='upper left')
+    # # fig.tight_layout()
+    # output_path = os.path.join(output_dir, f"teacher_student_diff_{global_step}.png")
+    # fig.savefig(output_path, dpi=150)
+    # plt.close(fig)
+    # print(f"[Visualization] Saved teacher-student diff (R^2={r2:.4f}) to {output_path}")

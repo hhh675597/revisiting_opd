@@ -128,6 +128,39 @@ def entropy_from_logits(logits: torch.Tensor):
     return entropy
 
 
+def topk_logprobs_from_logits(logits: torch.FloatTensor, k: int = 50):
+    """
+    Extract top-k token indices and their log probabilities from logits.
+    
+    Args:
+        logits: (batch_size, seq_len, vocab_size) or (seq_len, vocab_size)
+        k: number of top tokens to extract
+    
+    Returns:
+        topk_indices: (..., k) - indices of top-k tokens
+        topk_log_probs: (..., k) - log probabilities of top-k tokens
+    """
+    log_probs = F.log_softmax(logits, dim=-1)  # (..., vocab_size)
+    topk_log_probs, topk_indices = torch.topk(log_probs, k=k, dim=-1)  # (..., k)
+    return topk_indices, topk_log_probs
+
+
+def logprobs_from_logits_for_indices(logits: torch.FloatTensor, indices: torch.LongTensor):
+    """
+    Compute log probabilities for specific token indices.
+    
+    Args:
+        logits: (..., vocab_size) - raw logits
+        indices: (..., k) - token indices to compute log probs for
+    
+    Returns:
+        log_probs: (..., k) - log probabilities for the given indices
+    """
+    log_probs = F.log_softmax(logits, dim=-1)  # (..., vocab_size)
+    gathered_log_probs = torch.gather(log_probs, dim=-1, index=indices)  # (..., k)
+    return gathered_log_probs
+
+
 def masked_sum(values, mask, axis=None):
     """Compute mean of tensor with a masked values."""
     return (values * mask).sum(axis=axis)
