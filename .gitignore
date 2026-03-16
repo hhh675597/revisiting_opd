@@ -140,3 +140,9 @@ data/
 .tmp
 *ports
 
+
+/run_*.sh
+/evaluate_*.sh
+/test_*.sh
+infer.py
+requirements.txt

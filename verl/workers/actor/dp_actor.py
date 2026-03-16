@@ -1303,9 +1303,10 @@ class DataParallelPPOActor(BasePPOActor):
                         policy_loss = pg_loss
 
                     if self.config.use_kl_loss:
+                        # https://github.com/LunjunZhang/ema-pg
                         if use_full_kl:
                             # Full KL divergence computation (ema-pg style)
-                            use_kl_iw = self.config.get('use_kl_iw', False) # for importance sampling weight # 但我不太确定这个是否需要, 或许可以后续ablation一下?
+                            use_kl_iw = self.config.get('use_kl_iw', False) # for importance sampling weight
 
                             if use_kl_iw: # Compute importance weight for off-policy correction
                                 log_kl_iw = (log_prob - old_log_prob).detach()
@@ -1319,7 +1320,7 @@ class DataParallelPPOActor(BasePPOActor):
 
                             if kl_topk is not None and kl_topk > 0:
                                 # Memory-efficient top-k KL
-                                use_tail_sampling = self.config.get("kl_use_tail_sampling", False) # 这是别人的创新点, 我们paper不追求刷分的话就不使用了
+                                use_tail_sampling = self.config.get("kl_use_tail_sampling", False)
                                 tail_kwargs = {}
                                 if use_tail_sampling:
                                     # For OPD: use ref_topk_indices for the tail mask
