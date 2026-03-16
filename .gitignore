@@ -140,7 +140,7 @@ data/
 .tmp
 *ports
 
-
+analyze/
 /run_*.sh
 /evaluate_*.sh
 /test_*.sh
