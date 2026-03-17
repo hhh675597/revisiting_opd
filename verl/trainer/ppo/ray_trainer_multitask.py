@@ -1263,8 +1263,21 @@ class RayPPOTrainer:
                             reward_tensor, reward_extra_infos_dict = compute_reward(batch, self.reward_fn)
 
                     # recompute old_log_probs
+                    kl_topk_source = self.config.actor_rollout_ref.actor.get("kl_topk_source", "ref")
+                    kl_loss_type = self.config.actor_rollout_ref.actor.kl_loss_type
+                    kl_topk_k = self.config.actor_rollout_ref.actor.get('kl_topk_tokens', None)
+                    use_full_kl = kl_loss_type in ("full_forward", "full_reverse")
+                    use_actor_topk = (
+                        use_full_kl and kl_topk_source == "actor"
+                        and kl_topk_k is not None and kl_topk_k > 0
+                    )
+
                     with _timer("old_log_prob", timing_raw):
-                        old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
+                        if use_actor_topk:
+                            batch.meta_info["kl_topk_k"] = kl_topk_k
+                            old_log_prob = self.actor_rollout_wg.compute_log_prob_with_logits(batch)
+                        else:
+                            old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
                         entropys = old_log_prob.batch["entropys"]
                         response_masks = batch.batch["response_mask"]
                         loss_agg_mode = self.config.actor_rollout_ref.actor.loss_agg_mode
@@ -1318,10 +1331,6 @@ class RayPPOTrainer:
                             self.config.algorithm.get("opd", {}).get("topk", False)
                         )
                         opd_k = self.config.algorithm.get("opd", {}).get("k", 50)
-                        # These two will never happen at the same time
-                        kl_loss_type = self.config.actor_rollout_ref.actor.kl_loss_type
-                        kl_topk_k = self.config.actor_rollout_ref.actor.get('kl_topk_tokens', None)
-                        use_full_kl = kl_loss_type in ("full_forward", "full_reverse")
                         
                         if use_opd_topk is True and kl_topk_k is not None:
                             raise ValueError("algorithm.opd.topk and actor_rollout_ref.actor.kl_topk_tokens cannot be set together.")
@@ -1330,12 +1339,20 @@ class RayPPOTrainer:
                         with _timer("ref", timing_raw):
                             if use_full_kl:
                                 if kl_loss_type == "full_reverse":
-                                    # We need ref's topk indices to compute KL divergence
-                                    batch.meta_info["kl_topk_k"] = kl_topk_k
-                                    if not self.ref_in_actor:
-                                        ref_log_prob = self.ref_policy_wg.compute_ref_log_prob_with_logits(batch)
+                                    if use_actor_topk:
+                                        # Actor top-k: ref gathers at actor's top-k indices
+                                        batch.batch["kl_topk_indices"] = batch.batch["actor_topk_indices"]
+                                        if not self.ref_in_actor:
+                                            ref_log_prob = self.ref_policy_wg.compute_ref_log_prob_at_indices(batch)
+                                        else:
+                                            ref_log_prob = self.actor_rollout_wg.compute_ref_log_prob_at_indices(batch)
                                     else:
-                                        ref_log_prob = self.actor_rollout_wg.compute_ref_log_prob_with_logits(batch)
+                                        # Ref top-k (default): ref computes its own top-k indices
+                                        batch.meta_info["kl_topk_k"] = kl_topk_k
+                                        if not self.ref_in_actor:
+                                            ref_log_prob = self.ref_policy_wg.compute_ref_log_prob_with_logits(batch)
+                                        else:
+                                            ref_log_prob = self.actor_rollout_wg.compute_ref_log_prob_with_logits(batch)
                                 else:
                                     raise ValueError(f"Unsupported KL loss type: {kl_loss_type}. We only consider full_reverse KL loss type for now.")
 
