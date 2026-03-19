@@ -1326,11 +1326,11 @@ class DataParallelPPOActor(BasePPOActor):
                                     tail_kwargs = dict(
                                         actor_topk_indices=topk_idx_for_tail,
                                         ref_topk_indices=topk_idx_for_tail,
-                                        sampled_indices=responses,
+                                        # sampled_indices=responses,
                                         log_prob=log_prob,
                                         ref_log_prob=data["ref_log_prob"],
                                     )
-                                kl_L1, kl_L2 = compute_memory_efficient_kl(
+                                kl_L1, kl_L2, not_in_topk_ratio = compute_memory_efficient_kl(
                                     actor_logits_k=actor_logits_k,
                                     actor_logsumexp=actor_logsumexp,
                                     ref_logits_k=data["ref_logits_k"],
@@ -1339,11 +1339,13 @@ class DataParallelPPOActor(BasePPOActor):
                                     use_tail_sampling=use_tail_sampling,
                                     norm_to_one_for_kl=self.config.get("norm_to_one_for_kl", True),
                                     clip_log_ratio=self.config.get("clip_log_ratio", False),
+                                    sampled_indices=responses,
                                     **tail_kwargs,
                                 )
                                 if use_kl_iw:
                                     kl_L2 = kl_L2 * kl_iw
                                 kld = kl_L1 + kl_L2
+                                metrics["actor/not_in_topk_ratio"] = not_in_topk_ratio.detach().item()
                             else:
                                 raise NotImplementedError("Full KL without top-k is not implemented yet due to memory constraints. Please set kl_topk_tokens > 0.")
                         else:
