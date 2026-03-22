@@ -25,7 +25,7 @@ bs4==0.0.2
 cachebox==5.2.1
 cachetools==6.2.4
 catalogue==2.0.10
-certifi==2026.1.4
+certifi==2026.2.25
 cffi==2.0.0
 cfgv==3.5.0
 charset-normalizer==3.4.4
