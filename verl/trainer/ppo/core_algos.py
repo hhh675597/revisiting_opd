@@ -969,7 +969,13 @@ def compute_memory_efficient_kl(
     # else:
     #     L2 = torch.zeros_like(L1)
 
-    not_in_topk = compute_not_in_topk_mask(sampled_indices, ref_topk_indices)
+    if ref_topk_indices is not None:
+        not_in_topk = compute_not_in_topk_mask(sampled_indices, ref_topk_indices)
+    elif actor_topk_indices is not None:
+        not_in_topk = compute_not_in_topk_mask(sampled_indices, actor_topk_indices)
+    else:
+        not_in_topk = torch.zeros_like(sampled_indices, dtype=torch.bool)
+
     not_in_topk_ratio = not_in_topk.sum() / not_in_topk.numel()
 
     if norm_to_one_for_kl:
