@@ -456,3 +456,62 @@ class MultiTaskRefWorker(Worker):
             ref_policy.actor_module._handle.reshard(True)
         
         return output
+
+    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+    def compute_ref_log_prob_at_indices(self, data: DataProto):
+        """Compute ref log prob by gathering logits at externally-provided top-k indices.
+
+        Used for reverse KL when kl_topk_source='actor': the ref model gathers its
+        logits at the actor's top-k indices.
+
+        Expects data.batch["kl_topk_indices"] to contain the indices.
+        """
+        if 'task_type' not in data.non_tensor_batch:
+            raise ValueError("task_type not found in batch. Ensure MultiTaskRLHFDataset is used.")
+
+        task_types = data.non_tensor_batch['task_type']
+        unique_tasks = set(task_types)
+        if len(unique_tasks) != 1:
+            raise ValueError(
+                f"Mixed task batch detected: {unique_tasks}. "
+                f"MultiTaskRefWorker requires sequential batching (one task per batch)."
+            )
+
+        task_name = list(unique_tasks)[0]
+        if task_name not in self.task_ref_models:
+            raise ValueError(
+                f"No ref model found for task '{task_name}'. "
+                f"Available tasks: {list(self.task_ref_models.keys())}"
+            )
+
+        ref_policy = self.task_ref_models[task_name]
+
+        data = data.to(get_torch_device().current_device())
+        topk_indices = data.batch["kl_topk_indices"]
+
+        micro_batch_size = self.config.ref.log_prob_micro_batch_size_per_gpu
+        data.meta_info["micro_batch_size"] = micro_batch_size
+        data.meta_info["temperature"] = self.config.rollout.temperature
+        data.meta_info["max_token_len"] = self.config.ref.log_prob_max_token_len_per_gpu
+        data.meta_info["use_dynamic_bsz"] = self.config.ref.log_prob_use_dynamic_bsz
+
+        with self.ulysses_sharding_manager:
+            data = self.ulysses_sharding_manager.preprocess_data(data)
+            ref_log_prob, ref_kl_inputs = ref_policy.compute_log_prob_at_indices(
+                data=data, topk_indices=topk_indices
+            )
+            output = DataProto.from_dict(tensors={
+                "ref_log_prob": ref_log_prob,
+                "ref_logits_k": ref_kl_inputs["logits_k"],
+                "ref_logsumexp": ref_kl_inputs["logsumexp"],
+                "ref_topk_indices": ref_kl_inputs["topk_indices"],
+            })
+            output = self.ulysses_sharding_manager.postprocess_data(output)
+
+        output = output.to("cpu")
+
+        from verl.utils.fsdp_utils import fsdp_version
+        if self.world_size > 1 and fsdp_version(ref_policy.actor_module) == 1:
+            ref_policy.actor_module._handle.reshard(True)
+
+        return output

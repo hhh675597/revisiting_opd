@@ -923,24 +923,24 @@ def compute_memory_efficient_kl(
         assert log_prob is not None
         assert ref_log_prob is not None
 
-    if norm_to_one_for_kl:
-        teacher_log_probs_norm = torch.nn.functional.log_softmax(ref_logits_k, dim=-1)
-        student_log_probs_norm = torch.nn.functional.log_softmax(actor_logits_k, dim=-1)
-        student_probs_norm = torch.exp(student_log_probs_norm)
-        if clip_log_ratio:
-            diff = torch.clamp(student_log_probs_norm - teacher_log_probs_norm, min=-5.0, max=5.0)
-            L1 = (student_probs_norm * diff).sum(dim=-1)
-        else:
-            L1 = (student_probs_norm * (student_log_probs_norm - teacher_log_probs_norm)).sum(dim=-1)
-    else:
-        log_p_k = actor_logits_k - actor_logsumexp.unsqueeze(-1)
-        log_q_k = ref_logits_k - ref_logsumexp.unsqueeze(-1)
-        p_k = torch.exp(log_p_k)
-        if clip_log_ratio:
-            diff = torch.clamp(log_p_k - log_q_k, min=-5.0, max=5.0)
-            L1 = (p_k * diff).sum(dim=-1)
-        else:
-            L1 = (p_k * (log_p_k - log_q_k)).sum(dim=-1)
+    # if norm_to_one_for_kl:
+    #     teacher_log_probs_norm = torch.nn.functional.log_softmax(ref_logits_k, dim=-1)
+    #     student_log_probs_norm = torch.nn.functional.log_softmax(actor_logits_k, dim=-1)
+    #     student_probs_norm = torch.exp(student_log_probs_norm)
+    #     if clip_log_ratio:
+    #         diff = torch.clamp(student_log_probs_norm - teacher_log_probs_norm, min=-5.0, max=5.0)
+    #         L1 = (student_probs_norm * diff).sum(dim=-1)
+    #     else:
+    #         L1 = (student_probs_norm * (student_log_probs_norm - teacher_log_probs_norm)).sum(dim=-1)
+    # else:
+    #     log_p_k = actor_logits_k - actor_logsumexp.unsqueeze(-1)
+    #     log_q_k = ref_logits_k - ref_logsumexp.unsqueeze(-1)
+    #     p_k = torch.exp(log_p_k)
+    #     if clip_log_ratio:
+    #         diff = torch.clamp(log_p_k - log_q_k, min=-5.0, max=5.0)
+    #         L1 = (p_k * diff).sum(dim=-1)
+    #     else:
+    #         L1 = (p_k * (log_p_k - log_q_k)).sum(dim=-1)
 
     if kl_type == "full_forward":
         raise ValueError("full_forward KL(π_ref || π) is not supported in OPD.")
@@ -958,16 +958,83 @@ def compute_memory_efficient_kl(
         else:
             L2 = torch.zeros_like(L1)
 
+    # if use_tail_sampling:
+    #     # assert actor_topk_indices is not None
+    #     assert ref_topk_indices is not None
+    #     # not_in_topk = compute_not_in_topk_mask(sampled_indices, actor_topk_indices)
+        
+    #     pg_ratio = (log_prob - log_prob.detach()).exp()
+    #     kl_at_sampled = (log_prob - ref_log_prob).detach() * pg_ratio
+    #     L2 = not_in_topk.to(dtype=kl_at_sampled.dtype) * kl_at_sampled
+    # else:
+    #     L2 = torch.zeros_like(L1)
 
-
-    if use_tail_sampling:
-        assert actor_topk_indices is not None
+    if ref_topk_indices is not None:
+        not_in_topk = compute_not_in_topk_mask(sampled_indices, ref_topk_indices)
+    elif actor_topk_indices is not None:
         not_in_topk = compute_not_in_topk_mask(sampled_indices, actor_topk_indices)
-        pg_ratio = (log_prob - log_prob.detach()).exp()
-        kl_at_sampled = (log_prob - ref_log_prob).detach() * pg_ratio
-        L2 = not_in_topk.to(dtype=kl_at_sampled.dtype) * kl_at_sampled
     else:
-        L2 = torch.zeros_like(L1)
+        not_in_topk = torch.zeros_like(sampled_indices, dtype=torch.bool)
+
+    not_in_topk_ratio = not_in_topk.sum() / not_in_topk.numel()
+
+    if norm_to_one_for_kl:
+        if use_tail_sampling:
+            assert ref_topk_indices is not None
+            # recover sampled raw logits from full-vocab log probs
+            actor_sampled_logit = log_prob + actor_logsumexp          # (B, T)
+            ref_sampled_logit = ref_log_prob + ref_logsumexp         # (B, T)
+
+            # only append sampled token when it is NOT already in top-k
+            neg_inf = torch.finfo(actor_logits_k.dtype).min
+            actor_extra = torch.where(
+                not_in_topk, actor_sampled_logit, torch.full_like(actor_sampled_logit, neg_inf)
+            ).unsqueeze(-1)  # (B, T, 1)
+            ref_extra = torch.where(
+                not_in_topk, ref_sampled_logit, torch.full_like(ref_sampled_logit, neg_inf)
+            ).unsqueeze(-1)  # (B, T, 1)
+
+            # union support: top-k + sampled(outside top-k only)
+            actor_logits_union = torch.cat([actor_logits_k, actor_extra], dim=-1)  # (B, T, K+1)
+            ref_logits_union = torch.cat([ref_logits_k, ref_extra], dim=-1)        # (B, T, K+1)
+
+            student_log_probs_norm = torch.nn.functional.log_softmax(actor_logits_union, dim=-1)
+            teacher_log_probs_norm = torch.nn.functional.log_softmax(ref_logits_union, dim=-1)
+            student_probs_norm = student_log_probs_norm.exp()
+
+            if clip_log_ratio:
+                diff = torch.clamp(student_log_probs_norm - teacher_log_probs_norm, min=-5.0, max=5.0)
+            else:
+                diff = student_log_probs_norm - teacher_log_probs_norm
+
+            # top-k contribution
+            L1 = (student_probs_norm[..., :-1] * diff[..., :-1]).sum(dim=-1)
+
+            # sampled-token contribution (only nonzero when sampled not in top-k)
+            L2 = student_probs_norm[..., -1] * diff[..., -1]
+
+        else:
+            teacher_log_probs_norm = torch.nn.functional.log_softmax(ref_logits_k, dim=-1)
+            student_log_probs_norm = torch.nn.functional.log_softmax(actor_logits_k, dim=-1)
+            student_probs_norm = torch.exp(student_log_probs_norm)
+
+            if clip_log_ratio:
+                diff = torch.clamp(student_log_probs_norm - teacher_log_probs_norm, min=-5.0, max=5.0)
+                L1 = (student_probs_norm * diff).sum(dim=-1)
+            else:
+                L1 = (student_probs_norm * (student_log_probs_norm - teacher_log_probs_norm)).sum(dim=-1)
+
+            L2 = torch.zeros_like(L1)
+    else:
+        log_p_k = actor_logits_k - actor_logsumexp.unsqueeze(-1)
+        log_q_k = ref_logits_k - ref_logsumexp.unsqueeze(-1)
+        p_k = torch.exp(log_p_k)
+        if clip_log_ratio:
+            diff = torch.clamp(log_p_k - log_q_k, min=-5.0, max=5.0)
+            L1 = (p_k * diff).sum(dim=-1)
+        else:
+            L1 = (p_k * (log_p_k - log_q_k)).sum(dim=-1)
+
     
-    return L1, L2
+    return L1, L2, not_in_topk_ratio
 

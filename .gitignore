@@ -26,6 +26,7 @@ tensorflow/my_graph/*
 .idea/
 # C extensions
 *.so
+webshop_zip/
 
 # Distribution / packaging
 .Python

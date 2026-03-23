@@ -1173,14 +1173,14 @@ class DataParallelPPOActor(BasePPOActor):
         if self.config.use_kl_loss:
             kl_loss_type = self.config.kl_loss_type
             kl_topk = self.config.get("kl_topk_tokens", None)
+            kl_topk_source = self.config.get("kl_topk_source", "ref")
             if kl_loss_type in ("full_forward", "full_reverse"):
-                # Full KL requires logits from reference model
-                # For OPD full reverse KL, we always use ref_topk_indices here since teacher determines important tokens
                 select_keys.extend(["ref_logits_k", "ref_logsumexp", "ref_topk_indices"])
+                if kl_topk_source == "actor":
+                    select_keys.append("actor_topk_indices")
                 if self.config.get("kl_use_tail_sampling", False):
                     select_keys.append("ref_log_prob")
             else:
-                # Token-level KL
                 select_keys.append("ref_log_prob")
         batch = data.select(batch_keys=select_keys).batch
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
@@ -1250,14 +1250,10 @@ class DataParallelPPOActor(BasePPOActor):
                         calculate_entropy = True
 
                     if use_full_kl and kl_topk is not None and kl_topk > 0:
-                        # Memory-efficient top-k mode: gather actor logits at ref's top-k indices
-                        # For OPD: we ALWAYS use ref_topk_indices (teacher determines important tokens)
-                        kl_topk_indices = data["ref_topk_indices"]
-
-                        # if self.config.get("opd_mask_special_tokens", False):
-                        #     id_endoftext = self.config.get("id_endoftext", 151643)
-                        #     id_imend = self.config.get("id_im_end", 151645)
-                        #     kl_topk_indices = kl_topk_indices.masked_fill(kl_topk_indices == id_endoftext, id_imend)
+                        if kl_topk_source == "actor":
+                            kl_topk_indices = data["actor_topk_indices"]
+                        else:
+                            kl_topk_indices = data["ref_topk_indices"]
 
                         entropy, log_prob, actor_kl_inputs = self._forward_micro_batch_with_logits(
                             micro_batch=data, temperature=temperature,
@@ -1323,15 +1319,18 @@ class DataParallelPPOActor(BasePPOActor):
                                 use_tail_sampling = self.config.get("kl_use_tail_sampling", False)
                                 tail_kwargs = {}
                                 if use_tail_sampling:
-                                    # For OPD: use ref_topk_indices for the tail mask
+                                    topk_idx_for_tail = (
+                                        data["actor_topk_indices"] if kl_topk_source == "actor"
+                                        else data["ref_topk_indices"]
+                                    )
                                     tail_kwargs = dict(
-                                        actor_topk_indices=data["ref_topk_indices"],
-                                        ref_topk_indices=data["ref_topk_indices"],
-                                        sampled_indices=responses,
+                                        actor_topk_indices=topk_idx_for_tail,
+                                        ref_topk_indices=topk_idx_for_tail,
+                                        # sampled_indices=responses,
                                         log_prob=log_prob,
                                         ref_log_prob=data["ref_log_prob"],
                                     )
-                                kl_L1, kl_L2 = compute_memory_efficient_kl(
+                                kl_L1, kl_L2, not_in_topk_ratio = compute_memory_efficient_kl(
                                     actor_logits_k=actor_logits_k,
                                     actor_logsumexp=actor_logsumexp,
                                     ref_logits_k=data["ref_logits_k"],
@@ -1340,11 +1339,13 @@ class DataParallelPPOActor(BasePPOActor):
                                     use_tail_sampling=use_tail_sampling,
                                     norm_to_one_for_kl=self.config.get("norm_to_one_for_kl", True),
                                     clip_log_ratio=self.config.get("clip_log_ratio", False),
+                                    sampled_indices=responses,
                                     **tail_kwargs,
                                 )
                                 if use_kl_iw:
                                     kl_L2 = kl_L2 * kl_iw
                                 kld = kl_L1 + kl_L2
+                                metrics["actor/not_in_topk_ratio"] = not_in_topk_ratio.detach().item()
                             else:
                                 raise NotImplementedError("Full KL without top-k is not implemented yet due to memory constraints. Please set kl_topk_tokens > 0.")
                         else:

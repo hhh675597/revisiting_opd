@@ -191,6 +191,7 @@ python3 -m verl.trainer.main_ppo_multitask \
     algorithm.adv_estimator=placeholder \
     actor_rollout_ref.actor.kl_loss_type=full_reverse \
     +actor_rollout_ref.actor.kl_topk_tokens=32 \
+    +actor_rollout_ref.actor.kl_topk_source=ref \
     +actor_rollout_ref.actor.norm_to_one_for_kl=True \
     +actor_rollout_ref.actor.clip_log_ratio=False \
     +actor_rollout_ref.actor.opd_mask_special_tokens=False \
@@ -206,7 +207,8 @@ python3 -m verl.trainer.main_ppo_multitask \
 |------|-------|---------|
 | `algorithm.adv_estimator` | `placeholder` | No RL advantage computation; advantages are zeroed out |
 | `actor_rollout_ref.actor.kl_loss_type` | `full_reverse` | Full reverse KL divergence (KL(teacher \|\| student)) computed over top-K logits |
-| `+actor_rollout_ref.actor.kl_topk_tokens` | `32` | Number of top-K token positions (selected by the teacher) to compute KL over |
+| `+actor_rollout_ref.actor.kl_topk_tokens` | `32` | Number of top-K token positions to compute KL over |
+| `+actor_rollout_ref.actor.kl_topk_source` | `ref` | Whose top-K indices to use: `ref` (teacher) or `actor` (student) |
 | `+actor_rollout_ref.actor.norm_to_one_for_kl` | `True` | Normalize the top-K probability slice to sum to 1 before KL computation |
 | `+actor_rollout_ref.actor.clip_log_ratio` | `False` | Whether to clip log-probability ratios in KL |
 | `+actor_rollout_ref.actor.entropy_top_ratio` | `0.2` | Only train on the top 20% highest-entropy tokens per sample (entropy-based masking) |
@@ -294,6 +296,7 @@ The merged model can then be loaded as `STUDENT_MODEL` for evaluation or further
 | `algorithm.use_kl_in_reward` | `True` for original OPD, `False` for Teacher-TopK |
 | `actor_rollout_ref.actor.kl_loss_type` | `k1` (original OPD) or `full_reverse` (Teacher-TopK) |
 | `+actor_rollout_ref.actor.kl_topk_tokens` | Top-K token count for Teacher-TopK (e.g., `32`) |
+| `+actor_rollout_ref.actor.kl_topk_source` | Whose top-K indices to use: `ref` (teacher) or `actor` (student) |
 | `+actor_rollout_ref.actor.entropy_top_ratio` | Fraction of highest-entropy tokens to train on (e.g., `0.2`) |
 | `+actor_rollout_ref.actor.norm_to_one_for_kl` | Normalize top-K probabilities before KL |
 | `+actor_rollout_ref.actor.opd_mask_special_tokens` | Mask special tokens from KL computation |

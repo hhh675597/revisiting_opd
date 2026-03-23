@@ -804,7 +804,10 @@ class ActorRolloutRefWorker(Worker):
             if kl_inputs["topk_indices"] is not None:
                 tensors["actor_topk_indices"] = kl_inputs["topk_indices"]
 
-            output = DataProto.from_dict(tensors=tensors)
+            output = DataProto.from_dict(
+                tensors=tensors,
+                meta_info={"temperature": self.config.rollout.temperature},
+            )
             output = self.ulysses_sharding_manager.postprocess_data(output)
 
         output = output.to('cpu')
@@ -856,6 +859,52 @@ class ActorRolloutRefWorker(Worker):
 
         return output
 
+    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+    def compute_ref_log_prob_at_indices(self, data: DataProto):
+        """Compute ref log prob by gathering logits at externally-provided top-k indices.
+
+        Used for reverse KL when kl_topk_source='actor': the ref model gathers its
+        logits at the actor's top-k indices.
+
+        Expects data.batch["kl_topk_indices"] to contain the indices (actor's top-k).
+        """
+        assert self._is_ref
+        if self._is_offload_param:
+            load_fsdp_model_to_gpu(self.ref_policy.actor_module)
+
+        data = data.to('cuda')
+        topk_indices = data.batch["kl_topk_indices"]
+
+        micro_batch_size = self.config.ref.log_prob_micro_batch_size_per_gpu
+        data.meta_info['micro_batch_size'] = micro_batch_size
+        data.meta_info['temperature'] = self.config.rollout.temperature
+        data.meta_info['max_token_len'] = self.config.ref.log_prob_max_token_len_per_gpu
+        data.meta_info['use_dynamic_bsz'] = self.config.ref.log_prob_use_dynamic_bsz
+
+        with self.ulysses_sharding_manager:
+            data = self.ulysses_sharding_manager.preprocess_data(data)
+            ref_log_prob, ref_kl_inputs = self.ref_policy.compute_log_prob_at_indices(
+                data=data, topk_indices=topk_indices
+            )
+            output = DataProto.from_dict(tensors={
+                "ref_log_prob": ref_log_prob,
+                "ref_logits_k": ref_kl_inputs["logits_k"],
+                "ref_logsumexp": ref_kl_inputs["logsumexp"],
+                "ref_topk_indices": ref_kl_inputs["topk_indices"],
+            })
+            output = self.ulysses_sharding_manager.postprocess_data(output)
+
+        output = output.to('cpu')
+
+        from verl.utils.fsdp_utils import fsdp_version
+        if self.world_size > 1 and fsdp_version(self.ref_policy.actor_module) == 1:
+            self.ref_policy.actor_module._handle.reshard(True)
+
+        if self._is_offload_param:
+            offload_fsdp_model_to_cpu(self.ref_policy.actor_module)
+            log_gpu_memory_usage('After compute ref log prob at indices', logger=logger)
+
+        return output
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_log_prob_with_topk(self, data: DataProto):
