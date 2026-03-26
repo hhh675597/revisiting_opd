@@ -15,5 +15,5 @@
 
 python scripts/model_merger.py merge \
     --backend fsdp \
-    --local_dir /data/home/zdhs0010/agentic/verl-agent-multi/ckpts/multitask_ori_opd_mask_0302_183558/global_step_320/actor \
-    --target_dir /data/home/zdhs0010/agentic/verl-agent-multi/ckpts/multitask_ori_opd_mask_0302_183558/global_step_320/actor_merged
+    --local_dir /data/home/zdhs0010/agentic/verl-agent-multi/ckpts/multitask_student_topk_0324_142026/global_step_400/actor \
+    --target_dir /data/home/zdhs0010/agentic/verl-agent-multi/ckpts/multitask_student_topk_0324_142026/global_step_400/actor_merged

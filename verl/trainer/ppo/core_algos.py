@@ -1034,6 +1034,17 @@ def compute_memory_efficient_kl(
             L1 = (p_k * diff).sum(dim=-1)
         else:
             L1 = (p_k * (log_p_k - log_q_k)).sum(dim=-1)
+        
+        # tail sampling correction
+        if use_tail_sampling:
+            # https://github.com/LunjunZhang/ema-pg
+            # L2 = mask * pg_ratio * sg(log_prob - ref_log_prob)
+            pg_ratio = (log_prob - log_prob.detach()).exp()  # = 1.0 but with gradient flow
+            kl_at_sampled = (log_prob - ref_log_prob).detach() * pg_ratio
+
+            L2 = not_in_topk.to(dtype=kl_at_sampled.dtype) * kl_at_sampled
+        else:
+            L2 = torch.zeros_like(L1)
 
     
     return L1, L2, not_in_topk_ratio
