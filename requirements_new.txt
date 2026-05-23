@@ -207,7 +207,7 @@ pip==25.3
 platformdirs==4.5.1
 pre_commit==4.5.1
 preshed==3.0.12
-prometheus_client==0.24.1
+prometheus_client==0.25.0
 prometheus-fastapi-instrumentator==7.1.0
 prompt_toolkit==3.0.52
 propcache==0.4.1
